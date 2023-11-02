@@ -21,7 +21,9 @@ pub trait Schedule {
         }
     }
 
-    fn is_finished(&self) -> bool;
+    fn is_finished(&self) -> bool {
+        self.next().is_none()
+    }
 }
 
 /// Defines a schedule that is always ready to execute.
@@ -110,10 +112,6 @@ impl Schedule for CronSchedule {
     fn advance(&mut self) {
         self.next = self.it.next()
     }
-
-    fn is_finished(&self) -> bool {
-        self.next().is_none()
-    }
 }
 
 /// A schedule that is ready immediately.
@@ -149,10 +147,6 @@ impl<S: Schedule> Schedule for ImmediateSchedule<S> {
         } else {
             self.schedule.advance()
         }
-    }
-
-    fn is_finished(&self) -> bool {
-        self.schedule.is_finished()
     }
 }
 
@@ -207,8 +201,83 @@ impl<S: Schedule> Schedule for LimitedRunSchedule<S> {
             self.schedule.advance();
         }
     }
+}
 
-    fn is_finished(&self) -> bool {
-        self.next().is_none()
+pub struct NotBeforeSchedule<S: Schedule> {
+    start: DateTime<Utc>,
+    base: S,
+}
+
+impl<S: Schedule> NotBeforeSchedule<S> {
+    pub fn new(start: DateTime<Utc>, base: S) -> Self {
+        Self { start, base }
+    }
+}
+
+impl<S: Schedule> Schedule for NotBeforeSchedule<S> {
+    fn next(&self) -> Option<&DateTime<Utc>> {
+        if self.base.next().map_or(false, |x| x < &self.start) {
+            Some(&self.start)
+        } else {
+            self.base.next()
+        }
+    }
+
+    fn advance(&mut self) {
+        self.base.advance()
+    }
+}
+
+pub struct NotAfterSchedule<S: Schedule> {
+    end: DateTime<Utc>,
+    base: S,
+}
+
+impl<S: Schedule> NotAfterSchedule<S> {
+    pub fn new(end: DateTime<Utc>, base: S) -> Self {
+        Self { end, base }
+    }
+}
+
+impl<S: Schedule> Schedule for NotAfterSchedule<S> {
+    fn next(&self) -> Option<&DateTime<Utc>> {
+        if self.base.next().map_or(false, |x| x > &self.end) {
+            None
+        } else {
+            self.base.next()
+        }
+    }
+
+    fn advance(&mut self) {
+        self.base.advance()
+    }
+}
+
+pub struct DateRangeSchedule<S: Schedule> {
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
+    base: S,
+}
+
+impl<S: Schedule> DateRangeSchedule<S> {
+    pub fn new(start: DateTime<Utc>, end: DateTime<Utc>, base: S) -> Result<Self, SchedulerError> {
+        if end < start {
+            Err(SchedulerError::InvalidDateRange { start, end })
+        } else {
+            Ok(Self { start, end, base })
+        }
+    }
+}
+
+impl<S: Schedule> Schedule for DateRangeSchedule<S> {
+    fn next(&self) -> Option<&DateTime<Utc>> {
+        self.base
+            .next()
+            .map(|x| x.max(&self.start))
+            .map(|x| x.min(&self.end))
+    }
+
+    fn advance(&mut self) {
+        self.base.advance()
     }
 }

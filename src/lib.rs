@@ -4,10 +4,10 @@ pub mod job;
 pub mod scheduler;
 pub mod scheduling;
 
+use chrono::{DateTime, Utc};
 use justerror::Error;
 
 pub use crate::scheduler::*;
-pub use uuid::Uuid;
 
 #[Error]
 pub enum SchedulerError {
@@ -26,7 +26,7 @@ pub enum SchedulerError {
     Cancelled,
 
     #[error(desc = "requested job was not found")]
-    JobNotFound(Uuid),
+    JobNotFound(uuid::Uuid),
 
     #[error(desc = "error in {job}: {error}")]
     Internal {
@@ -36,4 +36,10 @@ pub enum SchedulerError {
 
     #[error(desc = "the given chrono::Duration contains an invalid value: {0}")]
     InvalidInterval(#[from] chrono::OutOfRangeError),
+
+    #[error(desc = "the end of the given date range is before the start")]
+    InvalidDateRange {
+        start: DateTime<Utc>,
+        end: DateTime<Utc>,
+    },
 }
