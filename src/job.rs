@@ -1,9 +1,12 @@
-use std::{sync::Arc, future::Future};
+use std::{future::Future, sync::Arc};
 
-use tokio::sync::{Mutex, RwLock};
+use tokio::{
+    select,
+    sync::{Mutex, RwLock},
+};
 use tokio_util::sync::CancellationToken;
 
-use crate::{scheduling::Schedule, JobHandle};
+use crate::{scheduling::Schedule, JobHandle, SchedulerError};
 
 pub use async_trait::async_trait;
 
@@ -33,11 +36,18 @@ impl<F: 'static + Send + Sync + FnMut(JobHandle, CancellationToken) -> JobResult
 }
 
 #[async_trait]
-impl<Fun: 'static + Send + Sync + FnMut(JobHandle, CancellationToken) -> Fut, Fut: Future<Output = JobResult> + Send + Sync> AsyncExecutable
-    for Fun
+impl<Fun, Fut> AsyncExecutable for Fun
+where
+    Fun: 'static + Send + Sync + FnMut(JobHandle, CancellationToken) -> Fut,
+    Fut: Future<Output = JobResult> + Send + Sync,
 {
     async fn execute(&mut self, handle: JobHandle, ct: CancellationToken) -> JobResult {
-        (*self)(handle, ct).await
+        let c_ct = ct.clone();
+
+        select! {
+            job_result = (*self)(handle, ct) => job_result,
+            _ = c_ct.cancelled() => Err( SchedulerError::Cancelled.into() ),
+        }
     }
 }
 
@@ -61,10 +71,10 @@ pub struct Job {
 
 impl Job {
     /// Creates a new job that executes synchronously.
-    /// 
+    ///
     /// The scheduler will spawn a new thread for the job when it is run; this function provides a means to create jobs that don't use `async`/`await`.
     /// If an `async` context is needed, please use [`Job::new_async()`] instead.
-    /// 
+    ///
     /// # Examples
     /// ----------
     ///
@@ -158,13 +168,13 @@ impl Job {
     }
 
     /// Creates a new job that executes asynchronously.
-    /// 
+    ///
     /// The scheduler will spawn a new thread for the job when it is run, and this function provides a means of creating jobs that use `async`/`await`.
     /// If an `async` context is not necessary, please consider using [`Job::new_sync()`] instead.
-    /// 
+    ///
     /// This function is not able to create jobs from anonymous functions, as `async` closures are currently an unstable feature.
     /// Creating new jobs from named `async` functions is still supported.
-    /// 
+    ///
     /// # Examples
     /// ----------
     ///
