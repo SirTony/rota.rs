@@ -8,6 +8,7 @@ use chrono::{DateTime, Utc};
 use justerror::Error;
 
 pub use crate::scheduler::*;
+pub use tokio_util::sync::CancellationToken;
 
 #[Error]
 pub enum SchedulerError {
