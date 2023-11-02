@@ -108,32 +108,32 @@ declare_static! {
         let ct = get_scheduler().await?.ct.clone();
         let sleep = Duration::from_millis( 1 );
 
-        let spawner = tokio::spawn( async move {
+        
+
+        tokio::spawn( async move {
             while !is_cancelled().await? {
                 spawn_jobs().await?;
                 tokio::time::sleep( sleep ).with_cancellation(ct.clone()).await?;
             }
 
             Ok(())
-        } );
-
-        spawner
+        } )
     };
 
     static JANITOR: JoinHandle<Result<(), SchedulerError>> = {
         let ct = get_scheduler().await?.ct.clone();
         let sleep = Duration::from_millis( 1 );
 
-        let janitor = tokio::spawn( async move {
+        
+
+        tokio::spawn( async move {
             while !is_cancelled().await? {
                 cleanup_jobs().await?;
                 tokio::time::sleep( sleep ).with_cancellation(ct.clone()).await?;
             }
 
             Ok(())
-        } );
-
-        janitor
+        } )
     };
 
     static ERR_FN: Option<Box<dyn FnMut( JobHandle, Box<dyn Error + Send + Sync> ) + Send + Sync + 'static>> = {
@@ -204,7 +204,7 @@ pub async fn add_job(job: Job) -> Result<JobHandle, SchedulerError> {
     let id = generate_job_id().await?;
     let mut scheduler = get_scheduler_mut().await?;
 
-    scheduler.jobs.insert(id.clone(), job);
+    scheduler.jobs.insert(id, job);
     println!("adding job {}", id);
     Ok(JobHandle(id))
 }
@@ -233,7 +233,7 @@ async fn find_ready_jobs() -> Result<HashMap<Uuid, Job>, SchedulerError> {
 
     for (id, job) in scheduler.jobs.iter() {
         if job.schedule.read().await.is_ready() {
-            ids.push(id.clone());
+            ids.push(*id);
         }
     }
 
@@ -251,10 +251,10 @@ pub async fn find_job(id: &Uuid) -> Result<JobHandle, SchedulerError> {
     let exists = get_scheduler().await?.jobs.contains_key(id) || get_active_jobs().await?.contains_key(id);
 
     if exists {
-        let handle = JobHandle(id.clone());
+        let handle = JobHandle(*id);
         Ok(handle)
     } else {
-        Err(SchedulerError::JobNotFound(id.clone()))
+        Err(SchedulerError::JobNotFound(*id))
     }
 }
 
@@ -264,7 +264,7 @@ async fn find_completed_jobs() -> Result<HashMap<Uuid, ActiveJob>, SchedulerErro
     let mut ids = Vec::new();
     for (id, job) in active.iter() {
         if job.ct.is_cancelled() || job.task.is_finished() {
-            ids.push(id.clone());
+            ids.push(*id);
         }
     }
 
@@ -284,7 +284,7 @@ async fn find_dead_jobs() -> Result<HashMap<Uuid, Job>, SchedulerError> {
 
     for (id, job) in scheduler.jobs.iter() {
         if job.schedule.read().await.is_finished() {
-            ids.push(id.clone());
+            ids.push(*id);
         }
     }
 
@@ -315,7 +315,7 @@ async fn spawn_jobs() -> Result<(), SchedulerError> {
     let ct = get_scheduler().await?.ct.child_token();
 
     for (id, job) in jobs.into_iter() {
-        let c_id = id.clone();
+        let c_id = id;
         let c_job = job.clone();
         let c_ct = ct.clone();
 
