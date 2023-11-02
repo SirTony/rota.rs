@@ -1,3 +1,5 @@
+mod ext;
+
 pub mod job;
 pub mod scheduler;
 pub mod scheduling;
@@ -26,9 +28,9 @@ pub enum SchedulerError {
     #[error(desc = "requested job was not found")]
     JobNotFound(Uuid),
 
-    #[error(desc = "error in job [{job_id}]: {error}")]
+    #[error(desc = "error in {job}: {error}")]
     Internal {
-        job_id: Uuid,
+        job: JobHandle,
         error: Box<dyn std::error::Error + Send + Sync>,
     },
 

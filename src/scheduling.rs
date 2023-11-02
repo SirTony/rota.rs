@@ -20,6 +20,8 @@ pub trait Schedule {
             false
         }
     }
+
+    fn is_finished(&self) -> bool;
 }
 
 /// Defines a schedule that is always ready to execute.
@@ -34,6 +36,10 @@ impl Schedule for AlwaysSchedule {
 
     fn is_ready(&self) -> bool {
         true
+    }
+
+    fn is_finished(&self) -> bool {
+        false
     }
 }
 
@@ -58,6 +64,10 @@ impl Schedule for IntervalSchedule {
 
     fn advance(&mut self) {
         self.next = Utc::now() + self.interval;
+    }
+
+    fn is_finished(&self) -> bool {
+        false
     }
 }
 
@@ -100,6 +110,10 @@ impl Schedule for CronSchedule {
     fn advance(&mut self) {
         self.next = self.it.next()
     }
+
+    fn is_finished(&self) -> bool {
+        self.next().is_none()
+    }
 }
 
 /// A schedule that is ready immediately.
@@ -135,6 +149,10 @@ impl<S: Schedule> Schedule for ImmediateSchedule<S> {
         } else {
             self.schedule.advance()
         }
+    }
+
+    fn is_finished(&self) -> bool {
+        self.schedule.is_finished()
     }
 }
 
@@ -188,5 +206,9 @@ impl<S: Schedule> Schedule for LimitedRunSchedule<S> {
             self.count.store(count + 1, Ordering::SeqCst);
             self.schedule.advance();
         }
+    }
+
+    fn is_finished(&self) -> bool {
+        self.next().is_none()
     }
 }

@@ -8,12 +8,21 @@ use crate::scheduling::Schedule;
 
 pub use async_trait::async_trait;
 
+/// The result type for all jobs in the scheduler.
+/// Jobs may not return data, but their errors must be bubbled up to the scheduler to be handled.
 pub type JobResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
 
+/// Implementing this for any arbitrary `struct` or `enum` will allow it to be added to the job scheduler.
+/// This trait is for jobs that contain no `async` code. If an `async` context is needed, implement `AsyncExecutable` instead.
 pub trait Executable {
+    /// Contains the logic of the job that will be run by the scheduler at the appropriate time.
+    /// # Arguments
+    ///  * `id` - ff
     fn execute(&mut self, id: Uuid, ct: CancellationToken) -> JobResult;
 }
 
+/// Implementing this for any arbitrary `struct` or `enum` will allow it to be added to the job scheduler.
+/// This trait is for jobs that contain `async` code. If an `async` context is not needed, implement `Executable` instead.
 #[async_trait]
 pub trait AsyncExecutable {
     async fn execute(&mut self, id: Uuid, ct: CancellationToken) -> JobResult;
