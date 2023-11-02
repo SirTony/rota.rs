@@ -7,7 +7,7 @@ use tokio_util::sync::CancellationToken;
 use crate::SchedulerError;
 
 #[async_trait]
-pub trait FutureEx: Future {
+pub(crate) trait FutureEx: Future {
     async fn with_cancellation(mut self, ct: CancellationToken) -> Result<(), SchedulerError>;
 }
 
