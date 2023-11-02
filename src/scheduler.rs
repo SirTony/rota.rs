@@ -1,4 +1,4 @@
-use std::{collections::HashMap, time::Duration, error::Error};
+use std::{collections::HashMap, error::Error, time::Duration};
 
 use paste::paste;
 use tokio::{
@@ -10,8 +10,9 @@ use uuid::Uuid;
 
 use crate::{
     ext::FutureEx,
-    job::{Job, JobKind, Executable, AsyncExecutable},
-    SchedulerError, scheduling::{LimitedRunSchedule, AlwaysSchedule},
+    job::{AsyncExecutable, Executable, Job, JobKind},
+    scheduling::{AlwaysSchedule, LimitedRunSchedule},
+    SchedulerError,
 };
 
 macro_rules! declare_static {
@@ -108,7 +109,7 @@ declare_static! {
         let ct = get_scheduler().await?.ct.clone();
         let sleep = Duration::from_millis( 1 );
 
-        
+
 
         tokio::spawn( async move {
             while !is_cancelled().await? {
@@ -124,7 +125,7 @@ declare_static! {
         let ct = get_scheduler().await?.ct.clone();
         let sleep = Duration::from_millis( 1 );
 
-        
+
 
         tokio::spawn( async move {
             while !is_cancelled().await? {
@@ -191,7 +192,11 @@ pub async fn wait_for_shutdown() -> Result<(), SchedulerError> {
     Ok(())
 }
 
-pub async fn set_err_fn<F: FnMut( JobHandle, Box<dyn Error + Send + Sync> ) + Send + Sync + 'static>( func: F ) -> Result<(), SchedulerError> {
+pub async fn set_err_fn<
+    F: FnMut(JobHandle, Box<dyn Error + Send + Sync>) + Send + Sync + 'static,
+>(
+    func: F,
+) -> Result<(), SchedulerError> {
     let mut err_fn = get_err_fn_mut().await?;
     err_fn.replace(Box::new(func));
 
@@ -211,8 +216,10 @@ pub async fn add_job(job: Job) -> Result<JobHandle, SchedulerError> {
 
 /// Adds an executable job as a background task.
 /// Background tasks begin running immediately and run only once.
-pub async fn add_background_task_sync<E: Executable + Send + Sync + 'static>( exec: E ) -> Result<JobHandle, SchedulerError> {
-    let once = LimitedRunSchedule::once( AlwaysSchedule );
+pub async fn add_background_task_sync<E: Executable + Send + Sync + 'static>(
+    exec: E,
+) -> Result<JobHandle, SchedulerError> {
+    let once = LimitedRunSchedule::once(AlwaysSchedule);
     let job = Job::new_sync(once, exec);
 
     add_job(job).await
@@ -220,8 +227,10 @@ pub async fn add_background_task_sync<E: Executable + Send + Sync + 'static>( ex
 
 /// Adds an executable job as a background task.
 /// Background tasks begin running immediately and run only once.
-pub async fn add_background_task_async<E: AsyncExecutable + Send + Sync + 'static>( exec: E ) -> Result<JobHandle, SchedulerError> {
-    let once = LimitedRunSchedule::once( AlwaysSchedule );
+pub async fn add_background_task_async<E: AsyncExecutable + Send + Sync + 'static>(
+    exec: E,
+) -> Result<JobHandle, SchedulerError> {
+    let once = LimitedRunSchedule::once(AlwaysSchedule);
     let job = Job::new_async(once, exec);
 
     add_job(job).await
@@ -248,7 +257,8 @@ async fn find_ready_jobs() -> Result<HashMap<Uuid, Job>, SchedulerError> {
 }
 
 pub async fn find_job(id: &Uuid) -> Result<JobHandle, SchedulerError> {
-    let exists = get_scheduler().await?.jobs.contains_key(id) || get_active_jobs().await?.contains_key(id);
+    let exists =
+        get_scheduler().await?.jobs.contains_key(id) || get_active_jobs().await?.contains_key(id);
 
     if exists {
         let handle = JobHandle(*id);
@@ -315,25 +325,25 @@ async fn spawn_jobs() -> Result<(), SchedulerError> {
     let ct = get_scheduler().await?.ct.child_token();
 
     for (id, job) in jobs.into_iter() {
-        let c_id = id;
         let c_job = job.clone();
         let c_ct = ct.clone();
 
         let task = tokio::spawn(async move {
-            println!("executing job {}", c_id);
+            println!("executing job {}", id);
+            let handle = JobHandle(id);
 
             let result = match c_job.kind {
                 JobKind::Sync(exec) => {
                     let mut lock = exec.lock().await;
-                    lock.execute(c_id, c_ct)
+                    lock.execute(handle, c_ct)
                 }
                 JobKind::Async(exec) => {
                     let mut lock = exec.lock().await;
-                    lock.execute(c_id, c_ct).await
+                    lock.execute(handle, c_ct).await
                 }
             }
             .map_err(|e| SchedulerError::Internal {
-                job: JobHandle(c_id),
+                job: JobHandle(id),
                 error: e,
             });
 
@@ -361,15 +371,15 @@ async fn cleanup_jobs() -> Result<(), SchedulerError> {
     for (id, job) in jobs.into_iter() {
         match job.task.with_cancellation(ct.clone()).await {
             Ok(_) => {}
-            Err(SchedulerError::Cancelled) => {},
-            Err( SchedulerError::Internal { job, error } ) => {
+            Err(SchedulerError::Cancelled) => {}
+            Err(SchedulerError::Internal { job, error }) => {
                 let mut err_fn = get_err_fn_mut().await?;
-                if let Some( ref mut err_fn ) = *err_fn {
+                if let Some(ref mut err_fn) = *err_fn {
                     (*err_fn)(job, error);
                 }
-            },
+            }
 
-            Err( e ) => return Err( e ),
+            Err(e) => return Err(e),
         }
 
         let mut scheduler = get_scheduler_mut().await?;
@@ -378,9 +388,9 @@ async fn cleanup_jobs() -> Result<(), SchedulerError> {
 
     // find all jobs with schedules that are finished so we can drop them
     let jobs = find_dead_jobs().await?;
-    for ( id, job ) in jobs.into_iter() {
-        println!( "deleting job {}", id );
-        drop( job );
+    for (id, job) in jobs.into_iter() {
+        println!("deleting job {}", id);
+        drop(job);
     }
 
     Ok(())
@@ -397,12 +407,12 @@ struct JobScheduler {
     ct: CancellationToken,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Copy, Clone)]
 pub struct JobHandle(Uuid);
 
 impl std::fmt::Display for JobHandle {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Job({})", self.0 )
+        write!(f, "Job({})", self.0)
     }
 }
 
@@ -410,6 +420,14 @@ impl JobHandle {
     /// The unique ID of the job within the scheduler.
     pub fn id(&self) -> &Uuid {
         &self.0
+    }
+
+    /// Determines if this handle is still valid.
+    /// The handle is considered valid if the job is currently running, or waiting to be run.
+    /// The handle is considered invalid if the job's schedule has finished or the job has been manually removed from the scheduler.
+    pub async fn is_valid(&self) -> Result<bool, SchedulerError> {
+        Ok(get_active_jobs().await?.contains_key(&self.0)
+            || get_scheduler().await?.jobs.contains_key(&self.0))
     }
 
     /// Determines whether or not the job is currently running.
@@ -448,14 +466,45 @@ impl JobHandle {
         Ok(())
     }
 
+    /// Removes the job from the scheduler, immediately cancelling the job if it's currently running.
+    /// This will drop the job and remove it from memory.
+    pub async fn delete(&self) -> Result<(), SchedulerError> {
+        while self.is_valid().await? {
+            if self.is_running().await? {
+                self.cancel().await?;
+                self.wait_for_exit().await?;
+                let mut active = get_active_jobs_mut().await?;
+                active.remove(&self.0);
+            } else {
+                let mut scheduler = get_scheduler_mut().await?;
+                scheduler.jobs.remove(&self.0);
+            }
+        }
+
+        Ok(())
+    }
+
     /// Returns the job's current cancellation token if the job is currently executing.
     /// It is generally not useful to store the result of this function as the token is only valid
     /// while the job is executing, and a new token is created each time a job begins exection.
-    pub async fn cancellation_token( &self ) -> Result<Option<CancellationToken>, SchedulerError> {
+    pub async fn cancellation_token(&self) -> Result<Option<CancellationToken>, SchedulerError> {
         if let Some(job) = get_active_jobs().await?.get(&self.0) {
-            Ok( Some( job.ct.clone() ) )
+            Ok(Some(job.ct.clone()))
         } else {
             Ok(None)
         }
+    }
+
+    /// Returns a future that resolves when the job has finished running.
+    pub async fn wait_for_exit(&self) -> Result<(), SchedulerError> {
+        let sleep = Duration::from_millis(1);
+        while let Some(ct) = self.cancellation_token().await? {
+            if !self.is_running().await? {
+                break;
+            }
+            tokio::time::sleep(sleep).with_cancellation(ct).await?;
+        }
+
+        Ok(())
     }
 }

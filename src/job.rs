@@ -2,9 +2,8 @@ use std::sync::Arc;
 
 use tokio::sync::{Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
-use uuid::Uuid;
 
-use crate::scheduling::Schedule;
+use crate::{scheduling::Schedule, JobHandle};
 
 pub use async_trait::async_trait;
 
@@ -17,27 +16,28 @@ pub type JobResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
 pub trait Executable {
     /// Contains the logic of the job that will be run by the scheduler at the appropriate time.
     /// # Arguments
-    ///  * `id` - ff
-    fn execute(&mut self, id: Uuid, ct: CancellationToken) -> JobResult;
+    fn execute(&mut self, handle: JobHandle, ct: CancellationToken) -> JobResult;
 }
 
 /// Implementing this for any arbitrary `struct` or `enum` will allow it to be added to the job scheduler.
 /// This trait is for jobs that contain `async` code. If an `async` context is not needed, implement `Executable` instead.
 #[async_trait]
 pub trait AsyncExecutable {
-    async fn execute(&mut self, id: Uuid, ct: CancellationToken) -> JobResult;
+    async fn execute(&mut self, handle: JobHandle, ct: CancellationToken) -> JobResult;
 }
 
-impl<F: 'static + Send + Sync + FnMut(Uuid, CancellationToken) -> JobResult> Executable for F {
-    fn execute(&mut self, id: Uuid, ct: CancellationToken) -> JobResult {
-        (*self)(id, ct)
+impl<F: 'static + Send + Sync + FnMut(JobHandle, CancellationToken) -> JobResult> Executable for F {
+    fn execute(&mut self, handle: JobHandle, ct: CancellationToken) -> JobResult {
+        (*self)(handle, ct)
     }
 }
 
 #[async_trait]
-impl<F: 'static + Send + Sync + FnMut(Uuid, CancellationToken) -> JobResult> AsyncExecutable for F {
-    async fn execute(&mut self, id: Uuid, ct: CancellationToken) -> JobResult {
-        (*self)(id, ct)
+impl<F: 'static + Send + Sync + FnMut(JobHandle, CancellationToken) -> JobResult> AsyncExecutable
+    for F
+{
+    async fn execute(&mut self, handle: JobHandle, ct: CancellationToken) -> JobResult {
+        (*self)(handle, ct)
     }
 }
 
