@@ -1,4 +1,9 @@
-use std::{collections::HashMap, error::Error, time::Duration};
+use std::{
+    collections::HashMap,
+    error::Error,
+    sync::atomic::{AtomicBool, Ordering},
+    time::Duration,
+};
 
 use paste::paste;
 use tokio::{
@@ -67,12 +72,6 @@ macro_rules! declare_static {
                 is_not_init
             }
 
-            pub async fn is_terminated() -> Result<bool, SchedulerError> {
-                let x = !is_ready() && is_initialized() && get_scheduler().await?.ct.is_cancelled();
-
-                Ok( x )
-            }
-
             pub fn is_initialized() -> bool {
                 let mut is_init = true;
                 $( is_init = is_init && [<is_ $name:lower _initialized>](); )+
@@ -99,7 +98,8 @@ declare_static! {
     static SCHEDULER: JobScheduler = {
         JobScheduler {
             jobs: HashMap::new(),
-            ct: CancellationToken::new()
+            ct: CancellationToken::new(),
+            is_running: AtomicBool::new( true ),
         }
     };
 
@@ -143,10 +143,17 @@ declare_static! {
 }
 
 pub async fn is_cancelled() -> Result<bool, SchedulerError> {
-    let scheduler = get_scheduler().await?;
-    Ok(scheduler.ct.is_cancelled())
+    Ok(get_scheduler().await?.ct.is_cancelled())
 }
 
+pub async fn is_terminated() -> Result<bool, SchedulerError> {
+    Ok(!is_ready() && is_initialized() && is_cancelled().await?)
+}
+
+/// Shuts down the scheduler, cancels all currently running jobs, and frees the jobs from memory.
+/// The future returned by this function resolves once the scheduler and all active jobs have stopped, so `await`-ing [wait_for_shutdown()] is not necessary.
+/// **Once the scheduler has been shut down, it may not be re-used.** The scheduler cannot be re-initialized, and any calls to scheduler functions will result in an error after thins function is called.
+/// If temporarily suspending the scheduler is desired, [pause()] should be used instead.
 pub async fn shutdown() -> Result<(), SchedulerError> {
     get_scheduler().await?.ct.cancel();
 
@@ -169,29 +176,54 @@ pub async fn shutdown() -> Result<(), SchedulerError> {
     Ok(())
 }
 
+/// The future returned by this function resolves once the scheduler and all jobs have stopped.
+/// This may be useful for command line applications that need to keep the process alive while the scheduler does its job.
 pub async fn wait_for_shutdown() -> Result<(), SchedulerError> {
     // it's important to clone the token and then await the cloned token to drop the RwLockReadGuard ASAP
     // otherwise await-ing this function would deadlock the whole scheduler
     let ct = get_scheduler().await?.ct.clone();
     ct.cancelled().await;
 
-    let active = get_active_jobs().await?;
-    let spawner = get_job_spawner().await?;
-    let janitor = get_janitor().await?;
-
     let sleep = Duration::from_millis(1);
 
-    while active.len() > 0 {
+    while get_active_jobs().await?.len() > 0 {
         tokio::time::sleep(sleep).await;
     }
 
-    while !spawner.is_finished() && !janitor.is_finished() {
+    while !get_job_spawner().await?.is_finished() && !get_janitor().await?.is_finished() {
         tokio::time::sleep(sleep).await;
     }
 
     Ok(())
 }
 
+/// Temporarily suspends the scheduler and prevents any jobs from being executed.
+/// Jobs that are already running will not be cancelled.
+/// This will not completely suspend all operation of the scheduler, as some internal bookkeeping will still take place,
+/// such as cleaning up jobs. Pausing the scheduler only stops jobs from being run.
+pub async fn pause() -> Result<(), SchedulerError> {
+    get_scheduler_mut()
+        .await?
+        .is_running
+        .store(false, Ordering::SeqCst);
+    Ok(())
+}
+
+/// Resumes normal operation of the scheduler.
+pub async fn resume() -> Result<(), SchedulerError> {
+    get_scheduler_mut()
+        .await?
+        .is_running
+        .store(true, Ordering::SeqCst);
+    Ok(())
+}
+
+/// Returns whether or not the scheduler is currently paused.
+pub async fn is_paused() -> Result<bool, SchedulerError> {
+    Ok(get_scheduler_mut().await?.is_running.load(Ordering::SeqCst))
+}
+
+/// Sets a function that will be called whenever a job experiences an error during exection.
 pub async fn set_err_fn<
     F: FnMut(JobHandle, Box<dyn Error + Send + Sync>) + Send + Sync + 'static,
 >(
@@ -256,11 +288,9 @@ async fn find_ready_jobs() -> Result<HashMap<Uuid, Job>, SchedulerError> {
     Ok(map)
 }
 
+/// Attempts to find a job being handled by the scheduler.
 pub async fn find_job(id: &Uuid) -> Result<JobHandle, SchedulerError> {
-    let exists =
-        get_scheduler().await?.jobs.contains_key(id) || get_active_jobs().await?.contains_key(id);
-
-    if exists {
+    if get_scheduler().await?.jobs.contains_key(id) || get_active_jobs().await?.contains_key(id) {
         let handle = JobHandle(*id);
         Ok(handle)
     } else {
@@ -325,39 +355,46 @@ async fn spawn_jobs() -> Result<(), SchedulerError> {
     let ct = get_scheduler().await?.ct.child_token();
 
     for (id, job) in jobs.into_iter() {
-        let c_job = job.clone();
-        let c_ct = ct.clone();
+        if get_scheduler_mut().await?.is_running.load(Ordering::SeqCst) {
+            let c_job = job.clone();
+            let c_ct = ct.clone();
 
-        let task = tokio::spawn(async move {
-            println!("executing job {}", id);
-            let handle = JobHandle(id);
+            let task = tokio::spawn(async move {
+                println!("executing job {}", id);
+                let handle = JobHandle(id);
 
-            let result = match c_job.kind {
-                JobKind::Sync(exec) => {
-                    let mut lock = exec.lock().await;
-                    lock.execute(handle, c_ct)
+                let result = match c_job.kind {
+                    JobKind::Sync(exec) => {
+                        let mut lock = exec.lock().await;
+                        lock.execute(handle, c_ct)
+                    }
+                    JobKind::Async(exec) => {
+                        let mut lock = exec.lock().await;
+                        lock.execute(handle, c_ct).await
+                    }
                 }
-                JobKind::Async(exec) => {
-                    let mut lock = exec.lock().await;
-                    lock.execute(handle, c_ct).await
-                }
-            }
-            .map_err(|e| SchedulerError::Internal {
-                job: JobHandle(id),
-                error: e,
+                .map_err(|e| SchedulerError::Internal {
+                    job: JobHandle(id),
+                    error: e,
+                });
+
+                c_job.schedule.write().await.advance();
+
+                result
             });
 
-            c_job.schedule.write().await.advance();
-
-            result
-        });
-
-        let job = ActiveJob {
-            job,
-            ct: ct.clone(),
-            task,
-        };
-        get_active_jobs_mut().await?.insert(id, job);
+            let job = ActiveJob {
+                job,
+                ct: ct.clone(),
+                task,
+            };
+            get_active_jobs_mut().await?.insert(id, job);
+        } else {
+            // WHATIF - should we advance the schedules while the scheduler is paused?
+            //          on the one hand, while the scheduler is paused, it should be paused
+            //          on the other hand, if it paused for a significant period of time, some schedules (like Cron) may fire rapidly multiple times once the scheduler resumes
+            job.schedule.write().await.advance();
+        }
     }
 
     Ok(())
@@ -405,6 +442,7 @@ struct ActiveJob {
 struct JobScheduler {
     jobs: HashMap<Uuid, Job>,
     ct: CancellationToken,
+    is_running: AtomicBool,
 }
 
 #[derive(Debug, Copy, Clone)]
