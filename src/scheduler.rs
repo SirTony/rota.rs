@@ -1,12 +1,14 @@
 use std::{
     collections::HashMap,
     error::Error,
+    future::Future,
     sync::atomic::{AtomicBool, Ordering},
     time::Duration,
 };
 
 use paste::paste;
 use tokio::{
+    runtime::Handle,
     sync::{OnceCell, RwLock, RwLockReadGuard, RwLockWriteGuard},
     task::JoinHandle,
 };
@@ -137,9 +139,9 @@ declare_static! {
         } )
     };
 
-    static ERR_FN: Option<Box<dyn FnMut( JobHandle, Box<dyn Error + Send + Sync> ) + Send + Sync + 'static>> = {
-        None
-    }
+    static STUBS: Vec<Uuid> = { Vec::new() };
+
+    static ERROR_HANDLERS: HashMap<Uuid, Box<dyn FnMut( JobHandle, Box<dyn std::error::Error + Send + Sync> ) + Send + Sync + 'static>> = { HashMap::new() }
 }
 
 pub async fn is_cancelled() -> Result<bool, SchedulerError> {
@@ -223,18 +225,6 @@ pub async fn is_paused() -> Result<bool, SchedulerError> {
     Ok(get_scheduler_mut().await?.is_running.load(Ordering::SeqCst))
 }
 
-/// Sets a function that will be called whenever a job experiences an error during exection.
-pub async fn set_err_fn<
-    F: FnMut(JobHandle, Box<dyn Error + Send + Sync>) + Send + Sync + 'static,
->(
-    func: F,
-) -> Result<(), SchedulerError> {
-    let mut err_fn = get_err_fn_mut().await?;
-    err_fn.replace(Box::new(func));
-
-    Ok(())
-}
-
 /// Adds a new job to the scheduler. Returns the job's id on success.
 pub async fn add_job(job: Job) -> Result<JobHandle, SchedulerError> {
     println!("attempting to schedule job");
@@ -266,6 +256,18 @@ pub async fn add_background_task_async<E: AsyncExecutable + Send + Sync + 'stati
     let job = Job::new_async(once, exec);
 
     add_job(job).await
+}
+
+/// Creates a stub for a job that can then be used to register the job with the scheduler.
+/// This reserves a unique ID and allows a handle for the job to be created before the job is actually registered,
+/// which may be useful for pre-configuration.
+pub async fn create_stub() -> Result<JobStub, SchedulerError> {
+    let id = generate_job_id().await?;
+    let mut stubs = get_stubs_mut().await?;
+
+    stubs.push(id);
+
+    Ok(JobStub(id))
 }
 
 async fn find_ready_jobs() -> Result<HashMap<Uuid, Job>, SchedulerError> {
@@ -341,9 +343,10 @@ async fn find_dead_jobs() -> Result<HashMap<Uuid, Job>, SchedulerError> {
 async fn generate_job_id() -> Result<Uuid, SchedulerError> {
     let scheduler = get_scheduler().await?;
     let active_jobs = get_active_jobs().await?;
+    let stubs = get_stubs().await?;
 
     let mut id = Uuid::new_v4();
-    while scheduler.jobs.contains_key(&id) || active_jobs.contains_key(&id) {
+    while scheduler.jobs.contains_key(&id) || active_jobs.contains_key(&id) || stubs.contains(&id) {
         id = Uuid::new_v4();
     }
 
@@ -410,8 +413,9 @@ async fn cleanup_jobs() -> Result<(), SchedulerError> {
             Ok(_) => {}
             Err(SchedulerError::Cancelled) => {}
             Err(SchedulerError::Internal { job, error }) => {
-                let mut err_fn = get_err_fn_mut().await?;
-                if let Some(ref mut err_fn) = *err_fn {
+                let mut handlers = get_error_handlers_mut().await?;
+                let handler = handlers.get_mut(&id);
+                if let Some(err_fn) = handler {
                     (*err_fn)(job, error);
                 }
             }
@@ -425,9 +429,11 @@ async fn cleanup_jobs() -> Result<(), SchedulerError> {
 
     // find all jobs with schedules that are finished so we can drop them
     let jobs = find_dead_jobs().await?;
+    let mut handlers = get_error_handlers_mut().await?;
     for (id, job) in jobs.into_iter() {
         println!("deleting job {}", id);
         drop(job);
+        handlers.remove(&id);
     }
 
     Ok(())
@@ -443,6 +449,67 @@ struct JobScheduler {
     jobs: HashMap<Uuid, Job>,
     ct: CancellationToken,
     is_running: AtomicBool,
+}
+
+#[derive(Debug)]
+pub struct JobStub(Uuid);
+
+impl Drop for JobStub {
+    fn drop(&mut self) {
+        with(get_stubs_mut(), move |mut stubs| {
+            if let Some(idx) = stubs.iter().position(|x| *x == self.0) {
+                with(get_error_handlers_mut(), move |mut handlers| {
+                    handlers.remove(&self.0);
+                });
+
+                stubs.remove(idx);
+            }
+        });
+
+        fn with<Fut, Fun, T, E>(future: Fut, func: Fun)
+        where
+            Fut: Future<Output = Result<T, E>>,
+            Fun: FnOnce(T),
+            E: Error,
+        {
+            let handle = Handle::current();
+            let guard = handle.enter();
+
+            if let Ok(output) = handle.block_on(future) {
+                func(output);
+            }
+
+            drop(guard);
+        }
+    }
+}
+
+impl JobStub {
+    pub fn as_handle(&self) -> JobHandle {
+        JobHandle(self.0)
+    }
+
+    pub async fn on_error<F>(&self, func: F) -> Result<(), SchedulerError>
+    where
+        F: FnMut(JobHandle, Box<dyn Error + Send + Sync>) + Send + Sync + 'static,
+    {
+        let mut handlers = get_error_handlers_mut().await?;
+        handlers.insert(self.0, Box::new(func));
+
+        Ok(())
+    }
+
+    pub async fn register(self, job: Job) -> Result<(), SchedulerError> {
+        let mut scheduler = get_scheduler_mut().await?;
+        let mut stubs = get_stubs_mut().await?;
+
+        scheduler.jobs.insert(self.0, job);
+        if let Some(idx) = stubs.iter().position(|x| *x == self.0) {
+            stubs.remove(idx);
+        }
+
+        Ok(())
+    }
 }
 
 #[derive(Debug, Copy, Clone)]
