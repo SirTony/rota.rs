@@ -7,7 +7,7 @@ use std::{
 use chrono::{DateTime, Utc};
 use cron::OwnedScheduleIterator;
 
-use crate::SchedulerError;
+use crate::Error;
 
 pub trait Schedule {
     fn next(&self) -> Option<&DateTime<Utc>>;
@@ -27,11 +27,23 @@ pub trait Schedule {
 }
 
 /// Defines a schedule that is always ready to execute.
-pub struct AlwaysSchedule;
+pub struct AlwaysSchedule(DateTime<Utc>);
+
+impl AlwaysSchedule {
+    pub fn new() -> Self {
+        Self(Utc::now())
+    }
+}
+
+impl Default for AlwaysSchedule {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl Schedule for AlwaysSchedule {
     fn next(&self) -> Option<&DateTime<Utc>> {
-        None
+        Some(&self.0)
     }
 
     fn advance(&mut self) {}
@@ -80,7 +92,7 @@ impl From<Duration> for IntervalSchedule {
 }
 
 impl TryFrom<chrono::Duration> for IntervalSchedule {
-    type Error = SchedulerError;
+    type Error = Error;
 
     fn try_from(value: chrono::Duration) -> Result<Self, Self::Error> {
         let std = value.to_std()?;
@@ -96,7 +108,7 @@ pub struct CronSchedule {
 }
 
 impl CronSchedule {
-    pub fn parse<S: AsRef<str>>(expr: S) -> Result<Self, SchedulerError> {
+    pub fn parse<S: AsRef<str>>(expr: S) -> Result<Self, Error> {
         let mut it = cron::Schedule::from_str(expr.as_ref())?.upcoming_owned(Utc);
         let next = it.next();
 
@@ -260,9 +272,9 @@ pub struct DateRangeSchedule<S: Schedule> {
 }
 
 impl<S: Schedule> DateRangeSchedule<S> {
-    pub fn new(start: DateTime<Utc>, end: DateTime<Utc>, base: S) -> Result<Self, SchedulerError> {
+    pub fn new(start: DateTime<Utc>, end: DateTime<Utc>, base: S) -> Result<Self, Error> {
         if end < start {
-            Err(SchedulerError::InvalidDateRange { start, end })
+            Err(Error::InvalidDateRange { start, end })
         } else {
             Ok(Self { start, end, base })
         }
@@ -279,5 +291,27 @@ impl<S: Schedule> Schedule for DateRangeSchedule<S> {
 
     fn advance(&mut self) {
         self.base.advance()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::scheduling::{AlwaysSchedule, Schedule};
+
+    use super::LimitedRunSchedule;
+
+    #[test]
+    fn always() {
+        let s = AlwaysSchedule::new();
+        assert!(s.is_ready(), "always not ready");
+        assert!(!s.is_finished(), "always is finished");
+    }
+
+    #[test]
+    fn once() {
+        let mut s = LimitedRunSchedule::once(AlwaysSchedule::new());
+        assert!(s.is_ready(), "once is not ready");
+        s.advance();
+        assert!(s.is_finished(), "once is not finished");
     }
 }

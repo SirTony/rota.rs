@@ -1,6 +1,6 @@
 # Rota
 
-A job scheduler library for Rust built on top of tokio. This project is partially inspired by tokio itself, env_logger, and other job scheduling libraries.
+A task scheduler library for Rust built on top of tokio. This project is partially inspired by tokio itself, env_logger, and other task scheduling libraries.
 
 #### Disclaimer
 

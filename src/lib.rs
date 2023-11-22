@@ -1,38 +1,47 @@
 mod ext;
 
-pub mod job;
 pub mod scheduler;
 pub mod scheduling;
+pub mod task;
 
 use chrono::{DateTime, Utc};
 use justerror::Error;
+use task::TaskError;
 
 pub use crate::scheduler::*;
 pub use tokio_util::sync::CancellationToken;
 
+pub type Result<T> = std::result::Result<T, crate::Error>;
+
 #[Error]
-pub enum SchedulerError {
+pub enum Error {
     Cron(#[from] cron::error::Error),
 
-    #[error(desc = "the job scheduler is already initialized")]
+    #[error(desc = "the scheduler is already initialized")]
     AlreadyInitialized,
 
-    #[error(desc = "the job scheduler hasn't been initialized yet")]
+    #[error(desc = "the scheduler hasn't been initialized yet")]
     NotInitialized,
 
-    #[error(desc = "the job scheduler has been shut down")]
+    #[error(desc = "the scheduler has been shut down")]
     Terminated,
+
+    #[error(desc = "the scheduler has not been started")]
+    NotStarted,
+
+    #[error(desc = "the scheduler has not been stopped")]
+    AlreadyRunning,
 
     #[error(desc = "the cancellation signal was raised")]
     Cancelled,
 
-    #[error(desc = "requested job was not found")]
-    JobNotFound(uuid::Uuid),
+    #[error(desc = "requested task was not found")]
+    TaskNotFound(uuid::Uuid),
 
-    #[error(desc = "error in {job}: {error}")]
+    #[error(desc = "error in {task}: {error}")]
     Internal {
-        job: JobHandle,
-        error: Box<dyn std::error::Error + Send + Sync>,
+        task: TaskId,
+        error: TaskError,
     },
 
     #[error(desc = "the given chrono::Duration contains an invalid value: {0}")]
