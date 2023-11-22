@@ -23,19 +23,19 @@ pub type ErrFn = Box<dyn FnMut(TaskId, TaskError) + Send + Sync>;
 pub trait Executable {
     /// Contains the logic of the task that will be run by the scheduler at the appropriate time.
     /// # Arguments
-    fn execute(&mut self, handle: TaskId, ct: CancellationToken) -> TaskResult;
+    fn execute(&mut self, id: TaskId, ct: CancellationToken) -> TaskResult;
 }
 
 /// Implementing this for any arbitrary `struct` or `enum` will allow it to be added to the task scheduler.
 /// This trait is for tasks that contain `async` code. If an `async` context is not needed, implement [Executable] instead.
 #[async_trait]
 pub trait AsyncExecutable {
-    async fn execute(&mut self, handle: TaskId, ct: CancellationToken) -> TaskResult;
+    async fn execute(&mut self, id: TaskId, ct: CancellationToken) -> TaskResult;
 }
 
 impl<F: 'static + Send + Sync + FnMut(TaskId, CancellationToken) -> TaskResult> Executable for F {
-    fn execute(&mut self, handle: TaskId, ct: CancellationToken) -> TaskResult {
-        (*self)(handle, ct)
+    fn execute(&mut self, id: TaskId, ct: CancellationToken) -> TaskResult {
+        (*self)(id, ct)
     }
 }
 
@@ -45,11 +45,11 @@ where
     Fun: 'static + Send + Sync + FnMut(TaskId, CancellationToken) -> Fut,
     Fut: Future<Output = TaskResult> + Send + Sync,
 {
-    async fn execute(&mut self, handle: TaskId, ct: CancellationToken) -> TaskResult {
+    async fn execute(&mut self, id: TaskId, ct: CancellationToken) -> TaskResult {
         let c_ct = ct.clone();
 
         select! {
-            task_result = (*self)(handle, ct) => task_result,
+            task_result = (*self)(id, ct) => task_result,
             _ = c_ct.cancelled() => Err( Error::Cancelled.into() ),
         }
     }
@@ -195,7 +195,7 @@ impl Task {
     /// use rota::scheduling::*;
     ///
     /// let once = LimitedRunSchedule::once( AlwaysSchedule::new() );
-    /// let task = Task::new_sync( once, | handle, ct | {
+    /// let task = Task::new_sync( once, | id, ct | {
     ///     println!( "Hello, World!" );
     ///     Ok( () )
     /// } );
@@ -209,7 +209,7 @@ impl Task {
     /// use rota::task::*;
     /// use rota::scheduling::*;
     ///
-    /// fn hello_world( handle: TaskId, ct: CancellationToken ) -> TaskResult {
+    /// fn hello_world( id: TaskId, ct: CancellationToken ) -> TaskResult {
     ///     println!( "Hello, World!" );
     ///     Ok( () )
     /// }
@@ -237,7 +237,7 @@ impl Task {
     /// }
     ///
     /// impl Executable for Producer {
-    ///     fn execute( &mut self, handle: TaskId, ct: CancellationToken ) -> TaskResult {
+    ///     fn execute( &mut self, id: TaskId, ct: CancellationToken ) -> TaskResult {
     ///         /* do some processing and send off a result */
     ///         Ok( () )
     ///     }
@@ -249,7 +249,7 @@ impl Task {
     /// }
     ///
     /// impl Executable for Consumer {
-    ///     fn execute( &mut self, handle: TaskId, ct: CancellationToken ) -> TaskResult {
+    ///     fn execute( &mut self, id: TaskId, ct: CancellationToken ) -> TaskResult {
     ///         /* receive some data and do more processing */
     ///         Ok( () )
     ///     }
@@ -295,7 +295,7 @@ impl Task {
     /// use rota::task::*;
     /// use rota::scheduling::*;
     ///
-    /// async fn hello_world( handle: TaskId, ct: CancellationToken ) -> TaskResult {
+    /// async fn hello_world( id: TaskId, ct: CancellationToken ) -> TaskResult {
     ///     println!( "Hello, World!" );
     ///     Ok( () )
     /// }
@@ -325,7 +325,7 @@ impl Task {
     ///
     /// #[async_trait]
     /// impl AsyncExecutable for Producer {
-    ///     async fn execute( &mut self, handle: TaskId, ct: CancellationToken ) -> TaskResult {
+    ///     async fn execute( &mut self, id: TaskId, ct: CancellationToken ) -> TaskResult {
     ///         /* do some processing and send off a result */
     ///         Ok( () )
     ///     }
@@ -338,7 +338,7 @@ impl Task {
     ///
     /// #[async_trait]
     /// impl AsyncExecutable for Consumer {
-    ///     async fn execute( &mut self, handle: TaskId, ct: CancellationToken ) -> TaskResult {
+    ///     async fn execute( &mut self, id: TaskId, ct: CancellationToken ) -> TaskResult {
     ///         /* receive some data and do more processing */
     ///         Ok( () )
     ///     }

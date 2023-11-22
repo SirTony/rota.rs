@@ -43,8 +43,8 @@ pub enum Error {
     #[error(desc = "requested task was not found")]
     TaskNotFound(uuid::Uuid),
 
-    #[error(desc = "error in {task}: {error}")]
-    Internal { task: TaskId, error: TaskError },
+    #[error(desc = "error in {id}: {error}")]
+    Internal { id: TaskId, error: TaskError },
 
     #[error(desc = "the given chrono::Duration contains an invalid value: {0}")]
     InvalidInterval(#[from] chrono::OutOfRangeError),

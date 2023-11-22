@@ -107,7 +107,7 @@ impl Scheduler {
 
                         for id in ids.into_iter() {
                             debug!("spawning task {}", id);
-                            let handle = TaskId(id);
+                            let task_id = TaskId(id);
                             let ct = ct.child_token();
                             let ct2 = ct.clone();
                             if let Some((id, task)) = tasks.remove_entry(&id) {
@@ -116,10 +116,10 @@ impl Scheduler {
                                     match kind {
                                         TaskExecutable::Sync(exec) => {
                                             let mut exec = exec.lock().await;
-                                            match exec.execute(handle, ct.clone()) {
+                                            match exec.execute(task_id, ct.clone()) {
                                                 Ok(x) => Ok(x),
                                                 Err(e) => Err(Error::Internal {
-                                                    task: handle,
+                                                    id: task_id,
                                                     error: e,
                                                 }),
                                             }
@@ -127,9 +127,9 @@ impl Scheduler {
                                         TaskExecutable::Async(exec) => {
                                             let mut exec = exec.lock().await;
                                             select! {
-                                                task_result = exec.execute(handle, ct.clone()) => match task_result {
+                                                task_result = exec.execute(task_id, ct.clone()) => match task_result {
                                                     Ok( x ) => Ok( x ),
-                                                    Err( e ) => Err( Error::Internal { task: handle, error: e } )
+                                                    Err( e ) => Err( Error::Internal { id: task_id, error: e } )
                                                 },
                                                 _ = ct.cancelled() => Err( Error::Cancelled )
                                             }
