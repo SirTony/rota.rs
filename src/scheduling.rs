@@ -1,10 +1,14 @@
 use std::{
-    str::FromStr,
     sync::atomic::{AtomicBool, AtomicU64, Ordering},
     time::Duration,
 };
 
+#[cfg(feature = "cron")]
+use std::str::FromStr;
+
 use chrono::{DateTime, Utc};
+
+#[cfg(feature = "cron")]
 use cron::OwnedScheduleIterator;
 
 use crate::Error;
@@ -102,11 +106,13 @@ impl TryFrom<chrono::Duration> for IntervalSchedule {
     }
 }
 
+#[cfg(feature = "cron")]
 pub struct CronSchedule {
     it: OwnedScheduleIterator<Utc>,
     next: Option<DateTime<Utc>>,
 }
 
+#[cfg(feature = "cron")]
 impl CronSchedule {
     pub fn parse<S: AsRef<str>>(expr: S) -> Result<Self, Error> {
         let mut it = cron::Schedule::from_str(expr.as_ref())?.upcoming_owned(Utc);
@@ -116,6 +122,7 @@ impl CronSchedule {
     }
 }
 
+#[cfg(feature = "cron")]
 impl Schedule for CronSchedule {
     fn next(&self) -> Option<&DateTime<Utc>> {
         self.next.as_ref()

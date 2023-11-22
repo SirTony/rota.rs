@@ -15,7 +15,12 @@ pub type Result<T> = std::result::Result<T, crate::Error>;
 
 #[Error]
 pub enum Error {
-    Cron(#[from] cron::error::Error),
+    #[cfg(feature = "cron")]
+    Cron(
+        #[from]
+        #[cfg(feature = "cron")]
+        cron::error::Error,
+    ),
 
     #[error(desc = "the scheduler is already initialized")]
     AlreadyInitialized,
@@ -39,10 +44,7 @@ pub enum Error {
     TaskNotFound(uuid::Uuid),
 
     #[error(desc = "error in {task}: {error}")]
-    Internal {
-        task: TaskId,
-        error: TaskError,
-    },
+    Internal { task: TaskId, error: TaskError },
 
     #[error(desc = "the given chrono::Duration contains an invalid value: {0}")]
     InvalidInterval(#[from] chrono::OutOfRangeError),
