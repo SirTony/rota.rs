@@ -87,7 +87,9 @@ impl Scheduler {
                             let mut ids = Vec::new();
 
                             for (id, task) in tasks.iter() {
-                                if task.schedule.read().await.is_ready() {
+                                if !task.is_paused.load(Ordering::SeqCst)
+                                    && task.schedule.read().await.is_ready()
+                                {
                                     ids.push(*id);
                                 }
                             }

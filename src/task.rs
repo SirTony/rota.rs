@@ -1,4 +1,11 @@
-use std::{collections::HashMap, future::Future, sync::Arc};
+use std::{
+    collections::HashMap,
+    future::Future,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+};
 
 use tokio::{
     select,
@@ -177,7 +184,8 @@ impl<const __HAS_ERR_FN: bool, const __HAS_NAME: bool>
                 .schedule
                 .expect("the maintainer forgot to set the schedule field"),
             err_fn: self.err_fn,
-            name: self.name,
+            name: self.name.map(Arc::new),
+            is_paused: Arc::new(AtomicBool::new(false)),
         }
     }
 }
@@ -193,11 +201,12 @@ pub struct Task {
     pub(crate) exec: TaskExecutable,
     pub(crate) schedule: Arc<RwLock<dyn Schedule + Send + Sync>>,
     pub(crate) err_fn: Option<Arc<Mutex<ErrFn>>>,
-    pub(crate) name: Option<String>,
+    pub(crate) name: Option<Arc<String>>,
+    pub(crate) is_paused: Arc<AtomicBool>,
 }
 
 impl Task {
-    pub fn builder() -> TaskBuilder<false, false, false> {
+    pub fn builder() -> TaskBuilder {
         TaskBuilder {
             exec: None,
             schedule: None,
@@ -304,6 +313,7 @@ impl Task {
             schedule: Arc::new(RwLock::new(schedule)),
             err_fn: None,
             name: None,
+            is_paused: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -394,6 +404,7 @@ impl Task {
             schedule: Arc::new(RwLock::new(schedule)),
             err_fn: None,
             name: None,
+            is_paused: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -405,7 +416,7 @@ impl Task {
     }
 
     pub fn set_name<S: ToString>(&mut self, name: S) {
-        self.name = Some(name.to_string());
+        self.name = Some(Arc::new(name.to_string()));
     }
 }
 
@@ -457,6 +468,47 @@ impl TaskHandle {
 
     pub async fn is_active(&self) -> bool {
         self.active.read().await.contains_key(&self.id)
+    }
+
+    pub async fn is_paused(&self) -> bool {
+        if let Some(task) = self.waiting.read().await.get(&self.id) {
+            task.is_paused.load(Ordering::SeqCst)
+        } else if let Some(active) = self.active.read().await.get(&self.id) {
+            active.task.is_paused.load(Ordering::SeqCst)
+        } else {
+            true
+        }
+    }
+
+    pub async fn pause(&self) {
+        if let Some(task) = self.waiting.read().await.get(&self.id) {
+            task.is_paused.store(true, Ordering::SeqCst)
+        } else if let Some(active) = self.active.read().await.get(&self.id) {
+            active.task.is_paused.store(true, Ordering::SeqCst)
+        }
+    }
+
+    pub async fn resume(&self) {
+        if let Some(task) = self.waiting.read().await.get(&self.id) {
+            task.is_paused.store(false, Ordering::SeqCst)
+        } else if let Some(active) = self.active.read().await.get(&self.id) {
+            active.task.is_paused.store(false, Ordering::SeqCst)
+        }
+    }
+
+    pub async fn cancel(&mut self) {
+        if let Some(active) = self.active.write().await.get(&self.id) {
+            active.ct.cancel();
+            active.handle.abort();
+        }
+    }
+
+    pub async fn remove(&mut self) {
+        self.pause().await;
+        self.cancel().await;
+
+        self.waiting.write().await.remove(&self.id);
+        self.active.write().await.remove(&self.id);
     }
 
     pub fn downgrade(self) -> TaskId {
