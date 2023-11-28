@@ -6,7 +6,7 @@ pub mod task;
 
 use chrono::{DateTime, Utc};
 use justerror::Error;
-use task::TaskError;
+use task::{TaskError, TaskId};
 
 pub use crate::scheduler::*;
 pub use tokio_util::sync::CancellationToken;

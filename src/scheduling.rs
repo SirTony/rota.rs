@@ -35,7 +35,7 @@ pub struct AlwaysSchedule(DateTime<Utc>);
 
 impl AlwaysSchedule {
     pub fn new() -> Self {
-        Self(Utc::now())
+        Self(DateTime::<Utc>::MIN_UTC)
     }
 }
 

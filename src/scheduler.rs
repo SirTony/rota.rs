@@ -15,15 +15,9 @@ use uuid::Uuid;
 
 use crate::{
     ext::FutureEx,
-    task::{Task, TaskExecutable},
+    task::{ActiveTask, Task, TaskExecutable, TaskHandle, TaskId},
     Error, Result,
 };
-
-struct ActiveTask {
-    handle: JoinHandle<Result<()>>,
-    ct: CancellationToken,
-    task: Task,
-}
 
 pub struct Scheduler {
     waiting_tasks: Arc<RwLock<HashMap<Uuid, Task>>>,
@@ -236,6 +230,21 @@ impl Scheduler {
         self.ct.clone().cancelled_owned()
     }
 
+    pub async fn get_task(&self, TaskId(id): TaskId) -> Option<TaskHandle> {
+        let waiting = self.waiting_tasks.read().await;
+        let active = self.active_tasks.read().await;
+
+        if waiting.contains_key(&id) || active.contains_key(&id) {
+            Some(TaskHandle {
+                id,
+                waiting: self.waiting_tasks.clone(),
+                active: self.active_tasks.clone(),
+            })
+        } else {
+            None
+        }
+    }
+
     async fn generate_task_id(&self) -> Uuid {
         let mut id = Uuid::new_v4();
 
@@ -246,14 +255,5 @@ impl Scheduler {
         }
 
         id
-    }
-}
-
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
-pub struct TaskId(Uuid);
-
-impl std::fmt::Display for TaskId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Task({})", self.0)
     }
 }

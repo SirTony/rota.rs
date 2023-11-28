@@ -1,12 +1,14 @@
-use std::{future::Future, sync::Arc};
+use std::{collections::HashMap, future::Future, sync::Arc};
 
 use tokio::{
     select,
     sync::{Mutex, RwLock},
+    task::JoinHandle,
 };
 use tokio_util::sync::CancellationToken;
+use uuid::Uuid;
 
-use crate::{scheduling::Schedule, Error, TaskId};
+use crate::{scheduling::Schedule, Error, Result};
 
 pub use async_trait::async_trait;
 
@@ -14,7 +16,7 @@ pub type TaskError = Box<dyn std::error::Error + Send + Sync>;
 
 /// The result type for all tasks in the scheduler.
 /// Tasks may not return data, but their errors must be bubbled up to the scheduler to be handled.
-pub type TaskResult = Result<(), TaskError>;
+pub type TaskResult = std::result::Result<(), TaskError>;
 
 pub type ErrFn = Box<dyn FnMut(TaskId, TaskError) + Send + Sync>;
 
@@ -79,69 +81,93 @@ pub struct TaskBuilder<
     const __HAS_EXEC: bool = false,
     const __HAS_SCHEDULE: bool = false,
     const __HAS_ERR_FN: bool = false,
+    const __HAS_NAME: bool = false,
 > {
     exec: Option<TaskExecutable>,
     schedule: Option<Arc<RwLock<dyn Schedule + Send + Sync>>>,
     err_fn: Option<Arc<Mutex<ErrFn>>>,
+    name: Option<String>,
 }
 
-impl<const __HAS_SCHEDULE: bool, const __HAS_ERR_FN: bool>
-    TaskBuilder<false, __HAS_SCHEDULE, __HAS_ERR_FN>
+impl<const __HAS_SCHEDULE: bool, const __HAS_ERR_FN: bool, const __HAS_NAME: bool>
+    TaskBuilder<false, __HAS_SCHEDULE, __HAS_ERR_FN, __HAS_NAME>
 {
     pub fn executable<E: Executable + Send + Sync + 'static>(
         self,
         exec: E,
-    ) -> TaskBuilder<true, __HAS_SCHEDULE, __HAS_ERR_FN> {
-        TaskBuilder::<true, __HAS_SCHEDULE, __HAS_ERR_FN> {
+    ) -> TaskBuilder<true, __HAS_SCHEDULE, __HAS_ERR_FN, __HAS_NAME> {
+        TaskBuilder::<true, __HAS_SCHEDULE, __HAS_ERR_FN, __HAS_NAME> {
             exec: Some(TaskExecutable::Sync(Arc::new(Mutex::new(exec)))),
             schedule: self.schedule,
             err_fn: self.err_fn,
+            name: self.name,
         }
     }
 
     pub fn async_executable<E: AsyncExecutable + Send + Sync + 'static>(
         self,
         exec: E,
-    ) -> TaskBuilder<true, __HAS_SCHEDULE, __HAS_ERR_FN> {
-        TaskBuilder::<true, __HAS_SCHEDULE, __HAS_ERR_FN> {
+    ) -> TaskBuilder<true, __HAS_SCHEDULE, __HAS_ERR_FN, __HAS_NAME> {
+        TaskBuilder::<true, __HAS_SCHEDULE, __HAS_ERR_FN, __HAS_NAME> {
             exec: Some(TaskExecutable::Async(Arc::new(Mutex::new(exec)))),
             schedule: self.schedule,
             err_fn: self.err_fn,
+            name: self.name,
         }
     }
 }
 
-impl<const __HAS_EXEC: bool, const __HAS_ERR_FN: bool>
-    TaskBuilder<__HAS_EXEC, false, __HAS_ERR_FN>
+impl<const __HAS_EXEC: bool, const __HAS_ERR_FN: bool, const __HAS_NAME: bool>
+    TaskBuilder<__HAS_EXEC, false, __HAS_ERR_FN, __HAS_NAME>
 {
     pub fn schedule<S: Schedule + Send + Sync + 'static>(
         self,
         schedule: S,
-    ) -> TaskBuilder<__HAS_EXEC, true, __HAS_ERR_FN> {
-        TaskBuilder::<__HAS_EXEC, true, __HAS_ERR_FN> {
+    ) -> TaskBuilder<__HAS_EXEC, true, __HAS_ERR_FN, __HAS_NAME> {
+        TaskBuilder::<__HAS_EXEC, true, __HAS_ERR_FN, __HAS_NAME> {
             exec: self.exec,
             schedule: Some(Arc::new(RwLock::new(schedule))),
             err_fn: self.err_fn,
+            name: self.name,
         }
     }
 }
 
-impl<const __HAS_EXEC: bool, const __HAS_SCHEDULE: bool>
-    TaskBuilder<__HAS_EXEC, __HAS_SCHEDULE, false>
+impl<const __HAS_EXEC: bool, const __HAS_SCHEDULE: bool, const __HAS_NAME: bool>
+    TaskBuilder<__HAS_EXEC, __HAS_SCHEDULE, false, __HAS_NAME>
 {
     pub fn on_error<F: FnMut(TaskId, TaskError) + Send + Sync + 'static>(
         self,
         f: F,
-    ) -> TaskBuilder<__HAS_EXEC, __HAS_SCHEDULE, true> {
-        TaskBuilder::<__HAS_EXEC, __HAS_SCHEDULE, true> {
+    ) -> TaskBuilder<__HAS_EXEC, __HAS_SCHEDULE, true, __HAS_NAME> {
+        TaskBuilder::<__HAS_EXEC, __HAS_SCHEDULE, true, __HAS_NAME> {
             exec: self.exec,
             schedule: self.schedule,
             err_fn: Some(Arc::new(Mutex::new(Box::new(f)))),
+            name: self.name,
         }
     }
 }
 
-impl<const __HAS_ERR_FN: bool> TaskBuilder<true, true, __HAS_ERR_FN> {
+impl<const __HAS_EXEC: bool, const __HAS_SCHEDULE: bool, const __HAS_ERR_FN: bool>
+    TaskBuilder<__HAS_EXEC, __HAS_SCHEDULE, __HAS_ERR_FN, false>
+{
+    pub fn name<S: ToString>(
+        self,
+        name: S,
+    ) -> TaskBuilder<__HAS_EXEC, __HAS_SCHEDULE, __HAS_ERR_FN, true> {
+        TaskBuilder::<__HAS_EXEC, __HAS_SCHEDULE, __HAS_ERR_FN, true> {
+            exec: self.exec,
+            schedule: self.schedule,
+            err_fn: self.err_fn,
+            name: Some(name.to_string()),
+        }
+    }
+}
+
+impl<const __HAS_ERR_FN: bool, const __HAS_NAME: bool>
+    TaskBuilder<true, true, __HAS_ERR_FN, __HAS_NAME>
+{
     pub fn build(self) -> Task {
         Task {
             exec: self
@@ -151,6 +177,7 @@ impl<const __HAS_ERR_FN: bool> TaskBuilder<true, true, __HAS_ERR_FN> {
                 .schedule
                 .expect("the maintainer forgot to set the schedule field"),
             err_fn: self.err_fn,
+            name: self.name,
         }
     }
 }
@@ -166,6 +193,7 @@ pub struct Task {
     pub(crate) exec: TaskExecutable,
     pub(crate) schedule: Arc<RwLock<dyn Schedule + Send + Sync>>,
     pub(crate) err_fn: Option<Arc<Mutex<ErrFn>>>,
+    pub(crate) name: Option<String>,
 }
 
 impl Task {
@@ -174,6 +202,7 @@ impl Task {
             exec: None,
             schedule: None,
             err_fn: None,
+            name: None,
         }
     }
 }
@@ -274,6 +303,7 @@ impl Task {
             exec: TaskExecutable::Sync(Arc::new(Mutex::new(exec))),
             schedule: Arc::new(RwLock::new(schedule)),
             err_fn: None,
+            name: None,
         }
     }
 
@@ -363,6 +393,7 @@ impl Task {
             exec: TaskExecutable::Async(Arc::new(Mutex::new(exec))),
             schedule: Arc::new(RwLock::new(schedule)),
             err_fn: None,
+            name: None,
         }
     }
 
@@ -371,5 +402,64 @@ impl Task {
         F: FnMut(TaskId, TaskError) + Send + Sync + 'static,
     {
         self.err_fn = Some(Arc::new(Mutex::new(Box::new(err_fn))));
+    }
+
+    pub fn set_name<S: ToString>(&mut self, name: S) {
+        self.name = Some(name.to_string());
+    }
+}
+
+pub(crate) struct ActiveTask {
+    pub handle: JoinHandle<Result<()>>,
+    pub ct: CancellationToken,
+    pub task: Task,
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub struct TaskId(pub(crate) Uuid);
+
+impl std::fmt::Display for TaskId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Task({})", self.0)
+    }
+}
+
+impl From<TaskHandle> for TaskId {
+    fn from(value: TaskHandle) -> Self {
+        Self(value.id)
+    }
+}
+
+#[derive(Clone)]
+pub struct TaskHandle {
+    pub(crate) id: Uuid,
+    pub(crate) waiting: Arc<RwLock<HashMap<Uuid, Task>>>,
+    pub(crate) active: Arc<RwLock<HashMap<Uuid, ActiveTask>>>,
+}
+
+impl TaskHandle {
+    pub async fn is_valid(&self) -> bool {
+        self.waiting.read().await.contains_key(&self.id)
+            || self.active.read().await.contains_key(&self.id)
+    }
+
+    pub async fn is_ready(&self) -> bool {
+        if let Some(task) = self.waiting.read().await.get(&self.id) {
+            task.schedule.read().await.is_ready()
+        } else {
+            false
+        }
+    }
+
+    pub async fn is_waiting(&self) -> bool {
+        self.waiting.read().await.contains_key(&self.id)
+    }
+
+    pub async fn is_active(&self) -> bool {
+        self.active.read().await.contains_key(&self.id)
+    }
+
+    pub fn downgrade(self) -> TaskId {
+        self.into()
     }
 }
