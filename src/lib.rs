@@ -6,7 +6,7 @@ pub mod task;
 
 use chrono::{DateTime, Utc};
 use justerror::Error;
-use task::{TaskError, TaskId};
+use task::Id;
 
 pub use crate::scheduler::*;
 pub use tokio_util::sync::CancellationToken;
@@ -44,7 +44,7 @@ pub enum Error {
     TaskNotFound(uuid::Uuid),
 
     #[error(desc = "error in {id}: {error}")]
-    Internal { id: TaskId, error: TaskError },
+    Internal { id: Id, error: crate::task::Error },
 
     #[error(desc = "the given chrono::Duration contains an invalid value: {0}")]
     InvalidInterval(#[from] chrono::OutOfRangeError),

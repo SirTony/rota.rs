@@ -15,12 +15,12 @@ use uuid::Uuid;
 
 use crate::{
     ext::FutureEx,
-    task::{ActiveTask, Task, TaskExecutable, TaskHandle, TaskId},
+    task::{ActiveTask, Handle, Id, ScheduledTask, TaskExecutable},
     Error, Result,
 };
 
 pub struct Scheduler {
-    waiting_tasks: Arc<RwLock<HashMap<Uuid, Task>>>,
+    waiting_tasks: Arc<RwLock<HashMap<Uuid, ScheduledTask>>>,
     active_tasks: Arc<RwLock<HashMap<Uuid, ActiveTask>>>,
     ct: CancellationToken,
     is_running: Arc<AtomicBool>,
@@ -48,12 +48,12 @@ impl Scheduler {
         }
     }
 
-    pub async fn add_task(&mut self, task: Task) -> TaskId {
+    pub async fn add_task(&mut self, task: ScheduledTask) -> Id {
         let id = self.generate_task_id().await;
         trace!("adding task {}", id);
         self.waiting_tasks.write().await.insert(id, task);
 
-        TaskId(id)
+        Id(id)
     }
 
     pub fn is_running(&self) -> bool {
@@ -103,7 +103,7 @@ impl Scheduler {
 
                         for id in ids.into_iter() {
                             debug!("spawning task {}", id);
-                            let task_id = TaskId(id);
+                            let task_id = Id(id);
                             let ct = ct.child_token();
                             let ct2 = ct.clone();
                             if let Some((id, task)) = tasks.remove_entry(&id) {
@@ -232,12 +232,12 @@ impl Scheduler {
         self.ct.clone().cancelled_owned()
     }
 
-    pub async fn get_task(&self, TaskId(id): TaskId) -> Option<TaskHandle> {
+    pub async fn get_task(&self, Id(id): Id) -> Option<Handle> {
         let waiting = self.waiting_tasks.read().await;
         let active = self.active_tasks.read().await;
 
         if waiting.contains_key(&id) || active.contains_key(&id) {
-            Some(TaskHandle {
+            Some(Handle {
                 id,
                 waiting: self.waiting_tasks.clone(),
                 active: self.active_tasks.clone(),
