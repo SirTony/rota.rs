@@ -31,21 +31,21 @@ pub trait Schedule {
 }
 
 /// Defines a schedule that is always ready to execute.
-pub struct AlwaysSchedule(DateTime<Utc>);
+pub struct Always(DateTime<Utc>);
 
-impl AlwaysSchedule {
+impl Always {
     pub fn new() -> Self {
         Self(DateTime::<Utc>::MIN_UTC)
     }
 }
 
-impl Default for AlwaysSchedule {
+impl Default for Always {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl Schedule for AlwaysSchedule {
+impl Schedule for Always {
     fn next(&self) -> Option<&DateTime<Utc>> {
         Some(&self.0)
     }
@@ -61,12 +61,12 @@ impl Schedule for AlwaysSchedule {
     }
 }
 
-pub struct IntervalSchedule {
+pub struct Interval {
     interval: Duration,
     next: DateTime<Utc>,
 }
 
-impl IntervalSchedule {
+impl Interval {
     pub fn new(interval: Duration) -> Self {
         Self {
             interval,
@@ -75,7 +75,7 @@ impl IntervalSchedule {
     }
 }
 
-impl Schedule for IntervalSchedule {
+impl Schedule for Interval {
     fn next(&self) -> Option<&DateTime<Utc>> {
         Some(&self.next)
     }
@@ -89,13 +89,13 @@ impl Schedule for IntervalSchedule {
     }
 }
 
-impl From<Duration> for IntervalSchedule {
+impl From<Duration> for Interval {
     fn from(value: Duration) -> Self {
         Self::new(value)
     }
 }
 
-impl TryFrom<chrono::Duration> for IntervalSchedule {
+impl TryFrom<chrono::Duration> for Interval {
     type Error = Error;
 
     fn try_from(value: chrono::Duration) -> Result<Self, Self::Error> {
@@ -107,13 +107,13 @@ impl TryFrom<chrono::Duration> for IntervalSchedule {
 }
 
 #[cfg(feature = "cron")]
-pub struct CronSchedule {
+pub struct Cron {
     it: OwnedScheduleIterator<Utc>,
     next: Option<DateTime<Utc>>,
 }
 
 #[cfg(feature = "cron")]
-impl CronSchedule {
+impl Cron {
     pub fn parse<S: AsRef<str>>(expr: S) -> Result<Self, Error> {
         let mut it = cron::Schedule::from_str(expr.as_ref())?.upcoming_owned(Utc);
         let next = it.next();
@@ -123,7 +123,7 @@ impl CronSchedule {
 }
 
 #[cfg(feature = "cron")]
-impl Schedule for CronSchedule {
+impl Schedule for Cron {
     fn next(&self) -> Option<&DateTime<Utc>> {
         self.next.as_ref()
     }
@@ -135,13 +135,13 @@ impl Schedule for CronSchedule {
 
 /// A schedule that is ready immediately.
 /// After the initial run, the underlying schedule is followed.
-pub struct ImmediateSchedule<S: Schedule> {
+pub struct Immediate<S: Schedule> {
     schedule: S,
     first_run: AtomicBool,
     created_at: DateTime<Utc>,
 }
 
-impl<S: Schedule> ImmediateSchedule<S> {
+impl<S: Schedule> Immediate<S> {
     pub fn new(schedule: S) -> Self {
         Self {
             schedule,
@@ -151,7 +151,7 @@ impl<S: Schedule> ImmediateSchedule<S> {
     }
 }
 
-impl<S: Schedule> Schedule for ImmediateSchedule<S> {
+impl<S: Schedule> Schedule for Immediate<S> {
     fn next(&self) -> Option<&DateTime<Utc>> {
         if self.first_run.load(Ordering::SeqCst) {
             Some(&self.created_at)
@@ -169,20 +169,20 @@ impl<S: Schedule> Schedule for ImmediateSchedule<S> {
     }
 }
 
-impl<S: Schedule> From<S> for ImmediateSchedule<S> {
+impl<S: Schedule> From<S> for Immediate<S> {
     fn from(schedule: S) -> Self {
         Self::new(schedule)
     }
 }
 
 /// A schedule that runs a maximum number of times.
-pub struct LimitedRunSchedule<S: Schedule> {
+pub struct LimitedRun<S: Schedule> {
     schedule: S,
     max_runs: u64,
     count: AtomicU64,
 }
 
-impl<S: Schedule> LimitedRunSchedule<S> {
+impl<S: Schedule> LimitedRun<S> {
     pub fn new(schedule: S, max_runs: u64) -> Self {
         Self {
             schedule,
@@ -204,7 +204,7 @@ impl<S: Schedule> LimitedRunSchedule<S> {
     }
 }
 
-impl<S: Schedule> Schedule for LimitedRunSchedule<S> {
+impl<S: Schedule> Schedule for LimitedRun<S> {
     fn next(&self) -> Option<&DateTime<Utc>> {
         if self.count.load(Ordering::SeqCst) >= self.max_runs {
             None
@@ -222,18 +222,18 @@ impl<S: Schedule> Schedule for LimitedRunSchedule<S> {
     }
 }
 
-pub struct NotBeforeSchedule<S: Schedule> {
+pub struct NotBefore<S: Schedule> {
     start: DateTime<Utc>,
     base: S,
 }
 
-impl<S: Schedule> NotBeforeSchedule<S> {
+impl<S: Schedule> NotBefore<S> {
     pub fn new(start: DateTime<Utc>, base: S) -> Self {
         Self { start, base }
     }
 }
 
-impl<S: Schedule> Schedule for NotBeforeSchedule<S> {
+impl<S: Schedule> Schedule for NotBefore<S> {
     fn next(&self) -> Option<&DateTime<Utc>> {
         if self.base.next().map_or(false, |x| x < &self.start) {
             Some(&self.start)
@@ -247,18 +247,18 @@ impl<S: Schedule> Schedule for NotBeforeSchedule<S> {
     }
 }
 
-pub struct NotAfterSchedule<S: Schedule> {
+pub struct NotAfter<S: Schedule> {
     end: DateTime<Utc>,
     base: S,
 }
 
-impl<S: Schedule> NotAfterSchedule<S> {
+impl<S: Schedule> NotAfter<S> {
     pub fn new(end: DateTime<Utc>, base: S) -> Self {
         Self { end, base }
     }
 }
 
-impl<S: Schedule> Schedule for NotAfterSchedule<S> {
+impl<S: Schedule> Schedule for NotAfter<S> {
     fn next(&self) -> Option<&DateTime<Utc>> {
         if self.base.next().map_or(false, |x| x > &self.end) {
             None
@@ -272,13 +272,13 @@ impl<S: Schedule> Schedule for NotAfterSchedule<S> {
     }
 }
 
-pub struct DateRangeSchedule<S: Schedule> {
+pub struct DateRange<S: Schedule> {
     start: DateTime<Utc>,
     end: DateTime<Utc>,
     base: S,
 }
 
-impl<S: Schedule> DateRangeSchedule<S> {
+impl<S: Schedule> DateRange<S> {
     pub fn new(start: DateTime<Utc>, end: DateTime<Utc>, base: S) -> Result<Self, Error> {
         if end < start {
             Err(Error::InvalidDateRange { start, end })
@@ -288,7 +288,7 @@ impl<S: Schedule> DateRangeSchedule<S> {
     }
 }
 
-impl<S: Schedule> Schedule for DateRangeSchedule<S> {
+impl<S: Schedule> Schedule for DateRange<S> {
     fn next(&self) -> Option<&DateTime<Utc>> {
         self.base
             .next()
@@ -303,20 +303,20 @@ impl<S: Schedule> Schedule for DateRangeSchedule<S> {
 
 #[cfg(test)]
 mod tests {
-    use crate::scheduling::{AlwaysSchedule, Schedule};
+    use crate::scheduling::{Always, Schedule};
 
-    use super::LimitedRunSchedule;
+    use super::LimitedRun;
 
     #[test]
     fn always() {
-        let s = AlwaysSchedule::new();
+        let s = Always::new();
         assert!(s.is_ready(), "always not ready");
         assert!(!s.is_finished(), "always is finished");
     }
 
     #[test]
     fn once() {
-        let mut s = LimitedRunSchedule::once(AlwaysSchedule::new());
+        let mut s = LimitedRun::once(Always::new());
         assert!(s.is_ready(), "once is not ready");
         s.advance();
         assert!(s.is_finished(), "once is not finished");

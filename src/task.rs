@@ -232,8 +232,8 @@ impl ScheduledTask {
     /// use rota::task::*;
     /// use rota::scheduling::*;
     ///
-    /// let once = LimitedRunSchedule::once( AlwaysSchedule::new() );
-    /// let task = Task::new_sync( once, | id, ct | {
+    /// let once = LimitedRun::once( Always::new() );
+    /// let task = ScheduledTask::new_sync( once, | id, ct | {
     ///     println!( "Hello, World!" );
     ///     Ok( () )
     /// } );
@@ -247,13 +247,13 @@ impl ScheduledTask {
     /// use rota::task::*;
     /// use rota::scheduling::*;
     ///
-    /// fn hello_world( id: TaskId, ct: CancellationToken ) -> TaskResult {
+    /// fn hello_world( id: Id, ct: CancellationToken ) -> rota::task::Result {
     ///     println!( "Hello, World!" );
     ///     Ok( () )
     /// }
     ///
-    /// let once = LimitedRunSchedule::once( AlwaysSchedule::new() );
-    /// let task = Task::new_sync( once, hello_world );
+    /// let once = LimitedRun::once( Always::new() );
+    /// let task = ScheduledTask::new_sync( once, hello_world );
     /// ```
     /// --------
     ///
@@ -275,7 +275,7 @@ impl ScheduledTask {
     /// }
     ///
     /// impl Executable for Producer {
-    ///     fn execute( &mut self, id: TaskId, ct: CancellationToken ) -> TaskResult {
+    ///     fn execute( &mut self, id: Id, ct: CancellationToken ) -> rota::task::Result {
     ///         /* do some processing and send off a result */
     ///         Ok( () )
     ///     }
@@ -287,7 +287,7 @@ impl ScheduledTask {
     /// }
     ///
     /// impl Executable for Consumer {
-    ///     fn execute( &mut self, id: TaskId, ct: CancellationToken ) -> TaskResult {
+    ///     fn execute( &mut self, id: Id, ct: CancellationToken ) -> rota::task::Result {
     ///         /* receive some data and do more processing */
     ///         Ok( () )
     ///     }
@@ -297,11 +297,11 @@ impl ScheduledTask {
     /// let sender = Producer { chan: sender };
     /// let receiver = Consumer { chan: receiver, foos: Vec::new() };
     ///
-    /// let every_5s = IntervalSchedule::new( Duration::from_secs( 5 ) );
-    /// let every_30s = IntervalSchedule::new( Duration::from_secs( 30 ) );
+    /// let every_5s = Interval::new( Duration::from_secs( 5 ) );
+    /// let every_30s = Interval::new( Duration::from_secs( 30 ) );
     ///
-    /// let sender_task = Task::new_sync( every_5s, sender );
-    /// let receiver_task = Task::new_sync( every_30s, receiver );
+    /// let sender_task = ScheduledTask::new_sync( every_5s, sender );
+    /// let receiver_task = ScheduledTask::new_sync( every_30s, receiver );
     /// ```
     pub fn new_sync<S, E>(schedule: S, exec: E) -> Self
     where
@@ -335,13 +335,13 @@ impl ScheduledTask {
     /// use rota::task::*;
     /// use rota::scheduling::*;
     ///
-    /// async fn hello_world( id: TaskId, ct: CancellationToken ) -> TaskResult {
+    /// async fn hello_world( id: Id, ct: CancellationToken ) -> rota::task::Result {
     ///     println!( "Hello, World!" );
     ///     Ok( () )
     /// }
     ///
-    /// let once = LimitedRunSchedule::once( AlwaysSchedule::new() );
-    /// let task = Task::new_async( once, hello_world );
+    /// let once = LimitedRun::once( Always::new() );
+    /// let task = ScheduledTask::new_async( once, hello_world );
     /// ```
     /// --------
     ///
@@ -365,7 +365,7 @@ impl ScheduledTask {
     ///
     /// #[async_trait]
     /// impl AsyncExecutable for Producer {
-    ///     async fn execute( &mut self, id: TaskId, ct: CancellationToken ) -> TaskResult {
+    ///     async fn execute( &mut self, id: Id, ct: CancellationToken ) -> rota::task::Result {
     ///         /* do some processing and send off a result */
     ///         Ok( () )
     ///     }
@@ -378,7 +378,7 @@ impl ScheduledTask {
     ///
     /// #[async_trait]
     /// impl AsyncExecutable for Consumer {
-    ///     async fn execute( &mut self, id: TaskId, ct: CancellationToken ) -> TaskResult {
+    ///     async fn execute( &mut self, id: Id, ct: CancellationToken ) -> rota::task::Result {
     ///         /* receive some data and do more processing */
     ///         Ok( () )
     ///     }
@@ -388,11 +388,11 @@ impl ScheduledTask {
     /// let sender = Producer { chan: sender };
     /// let receiver = Consumer { chan: receiver, foos: Vec::new() };
     ///
-    /// let every_5s = IntervalSchedule::new( Duration::from_secs( 5 ) );
-    /// let every_30s = IntervalSchedule::new( Duration::from_secs( 30 ) );
+    /// let every_5s = Interval::new( Duration::from_secs( 5 ) );
+    /// let every_30s = Interval::new( Duration::from_secs( 30 ) );
     ///
-    /// let sender_task = Task::new_async( every_5s, sender );
-    /// let receiver_task = Task::new_async( every_30s, receiver );
+    /// let sender_task = ScheduledTask::new_async( every_5s, sender );
+    /// let receiver_task = ScheduledTask::new_async( every_30s, receiver );
     /// ```
     pub fn new_async<S, E>(schedule: S, exec: E) -> Self
     where
