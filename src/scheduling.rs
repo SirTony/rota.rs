@@ -14,12 +14,12 @@ use cron::OwnedScheduleIterator;
 use crate::Error;
 
 pub trait Schedule {
-    fn next(&self) -> Option<&DateTime<Utc>>;
+    fn next(&self) -> Option<DateTime<Utc>>;
     fn advance(&mut self);
 
     fn is_ready(&self) -> bool {
         if let Some(when) = self.next() {
-            Utc::now() >= *when
+            Utc::now() >= when
         } else {
             false
         }
@@ -31,23 +31,11 @@ pub trait Schedule {
 }
 
 /// Defines a schedule that is always ready to execute.
-pub struct Always(DateTime<Utc>);
-
-impl Always {
-    pub fn new() -> Self {
-        Self(DateTime::<Utc>::MIN_UTC)
-    }
-}
-
-impl Default for Always {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+pub struct Always;
 
 impl Schedule for Always {
-    fn next(&self) -> Option<&DateTime<Utc>> {
-        Some(&self.0)
+    fn next(&self) -> Option<DateTime<Utc>> {
+        Some(DateTime::<Utc>::MIN_UTC)
     }
 
     fn advance(&mut self) {}
@@ -76,8 +64,8 @@ impl Interval {
 }
 
 impl Schedule for Interval {
-    fn next(&self) -> Option<&DateTime<Utc>> {
-        Some(&self.next)
+    fn next(&self) -> Option<DateTime<Utc>> {
+        Some(self.next)
     }
 
     fn advance(&mut self) {
@@ -124,8 +112,8 @@ impl Cron {
 
 #[cfg(feature = "cron")]
 impl Schedule for Cron {
-    fn next(&self) -> Option<&DateTime<Utc>> {
-        self.next.as_ref()
+    fn next(&self) -> Option<DateTime<Utc>> {
+        self.next
     }
 
     fn advance(&mut self) {
@@ -152,9 +140,9 @@ impl<S: Schedule> Immediate<S> {
 }
 
 impl<S: Schedule> Schedule for Immediate<S> {
-    fn next(&self) -> Option<&DateTime<Utc>> {
+    fn next(&self) -> Option<DateTime<Utc>> {
         if self.first_run.load(Ordering::SeqCst) {
-            Some(&self.created_at)
+            Some(self.created_at)
         } else {
             self.schedule.next()
         }
@@ -205,7 +193,7 @@ impl<S: Schedule> LimitedRun<S> {
 }
 
 impl<S: Schedule> Schedule for LimitedRun<S> {
-    fn next(&self) -> Option<&DateTime<Utc>> {
+    fn next(&self) -> Option<DateTime<Utc>> {
         if self.count.load(Ordering::SeqCst) >= self.max_runs {
             None
         } else {
@@ -234,9 +222,9 @@ impl<S: Schedule> NotBefore<S> {
 }
 
 impl<S: Schedule> Schedule for NotBefore<S> {
-    fn next(&self) -> Option<&DateTime<Utc>> {
-        if self.base.next().map_or(false, |x| x < &self.start) {
-            Some(&self.start)
+    fn next(&self) -> Option<DateTime<Utc>> {
+        if self.base.next().map_or(false, |x| x < self.start) {
+            Some(self.start)
         } else {
             self.base.next()
         }
@@ -259,8 +247,8 @@ impl<S: Schedule> NotAfter<S> {
 }
 
 impl<S: Schedule> Schedule for NotAfter<S> {
-    fn next(&self) -> Option<&DateTime<Utc>> {
-        if self.base.next().map_or(false, |x| x > &self.end) {
+    fn next(&self) -> Option<DateTime<Utc>> {
+        if self.base.next().map_or(false, |x| x > self.end) {
             None
         } else {
             self.base.next()
@@ -289,11 +277,11 @@ impl<S: Schedule> DateRange<S> {
 }
 
 impl<S: Schedule> Schedule for DateRange<S> {
-    fn next(&self) -> Option<&DateTime<Utc>> {
+    fn next(&self) -> Option<DateTime<Utc>> {
         self.base
             .next()
-            .map(|x| x.max(&self.start))
-            .map(|x| x.min(&self.end))
+            .map(|x| x.max(self.start))
+            .map(|x| x.min(self.end))
     }
 
     fn advance(&mut self) {
@@ -309,14 +297,14 @@ mod tests {
 
     #[test]
     fn always() {
-        let s = Always::new();
+        let s = Always;
         assert!(s.is_ready(), "always not ready");
         assert!(!s.is_finished(), "always is finished");
     }
 
     #[test]
     fn once() {
-        let mut s = LimitedRun::once(Always::new());
+        let mut s = LimitedRun::once(Always);
         assert!(s.is_ready(), "once is not ready");
         s.advance();
         assert!(s.is_finished(), "once is not finished");

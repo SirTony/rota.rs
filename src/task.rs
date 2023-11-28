@@ -232,7 +232,7 @@ impl ScheduledTask {
     /// use rota::task::*;
     /// use rota::scheduling::*;
     ///
-    /// let once = LimitedRun::once( Always::new() );
+    /// let once = LimitedRun::once( Always );
     /// let task = ScheduledTask::new_sync( once, | id, ct | {
     ///     println!( "Hello, World!" );
     ///     Ok( () )
@@ -252,7 +252,7 @@ impl ScheduledTask {
     ///     Ok( () )
     /// }
     ///
-    /// let once = LimitedRun::once( Always::new() );
+    /// let once = LimitedRun::once( Always );
     /// let task = ScheduledTask::new_sync( once, hello_world );
     /// ```
     /// --------
@@ -340,7 +340,7 @@ impl ScheduledTask {
     ///     Ok( () )
     /// }
     ///
-    /// let once = LimitedRun::once( Always::new() );
+    /// let once = LimitedRun::once( Always );
     /// let task = ScheduledTask::new_async( once, hello_world );
     /// ```
     /// --------
