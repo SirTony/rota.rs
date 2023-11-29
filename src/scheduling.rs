@@ -6,6 +6,7 @@ use std::{
 #[cfg(feature = "cron")]
 use std::str::FromStr;
 
+use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 
 #[cfg(feature = "cron")]
@@ -13,7 +14,7 @@ use cron::OwnedScheduleIterator;
 
 use crate::Error;
 
-pub trait Schedule {
+pub trait SyncSchedule {
     fn next(&self) -> Option<DateTime<Utc>>;
     fn advance(&mut self);
 
@@ -30,10 +31,28 @@ pub trait Schedule {
     }
 }
 
+#[async_trait]
+pub trait AsyncSchedule {
+    async fn next(&self) -> Option<DateTime<Utc>>;
+    async fn advance(&mut self);
+
+    async fn is_ready(&self) -> bool {
+        if let Some(when) = self.next().await {
+            Utc::now() >= when
+        } else {
+            false
+        }
+    }
+
+    async fn is_finished(&self) -> bool {
+        self.next().await.is_none()
+    }
+}
+
 /// Defines a schedule that is always ready to execute.
 pub struct Always;
 
-impl Schedule for Always {
+impl SyncSchedule for Always {
     fn next(&self) -> Option<DateTime<Utc>> {
         Some(DateTime::<Utc>::MIN_UTC)
     }
@@ -45,6 +64,23 @@ impl Schedule for Always {
     }
 
     fn is_finished(&self) -> bool {
+        false
+    }
+}
+
+#[async_trait]
+impl AsyncSchedule for Always {
+    async fn next(&self) -> Option<DateTime<Utc>> {
+        Some(DateTime::<Utc>::MIN_UTC)
+    }
+
+    async fn advance(&mut self) {}
+
+    async fn is_ready(&self) -> bool {
+        true
+    }
+
+    async fn is_finished(&self) -> bool {
         false
     }
 }
@@ -63,7 +99,7 @@ impl Interval {
     }
 }
 
-impl Schedule for Interval {
+impl SyncSchedule for Interval {
     fn next(&self) -> Option<DateTime<Utc>> {
         Some(self.next)
     }
@@ -73,6 +109,21 @@ impl Schedule for Interval {
     }
 
     fn is_finished(&self) -> bool {
+        false
+    }
+}
+
+#[async_trait]
+impl AsyncSchedule for Interval {
+    async fn next(&self) -> Option<DateTime<Utc>> {
+        Some(self.next)
+    }
+
+    async fn advance(&mut self) {
+        self.next = Utc::now() + self.interval;
+    }
+
+    async fn is_finished(&self) -> bool {
         false
     }
 }
@@ -111,7 +162,7 @@ impl Cron {
 }
 
 #[cfg(feature = "cron")]
-impl Schedule for Cron {
+impl SyncSchedule for Cron {
     fn next(&self) -> Option<DateTime<Utc>> {
         self.next
     }
@@ -123,13 +174,13 @@ impl Schedule for Cron {
 
 /// A schedule that is ready immediately.
 /// After the initial run, the underlying schedule is followed.
-pub struct Immediate<S: Schedule> {
+pub struct Immediate<S: SyncSchedule> {
     schedule: S,
     first_run: AtomicBool,
     created_at: DateTime<Utc>,
 }
 
-impl<S: Schedule> Immediate<S> {
+impl<S: SyncSchedule> Immediate<S> {
     pub fn new(schedule: S) -> Self {
         Self {
             schedule,
@@ -139,7 +190,7 @@ impl<S: Schedule> Immediate<S> {
     }
 }
 
-impl<S: Schedule> Schedule for Immediate<S> {
+impl<S: SyncSchedule> SyncSchedule for Immediate<S> {
     fn next(&self) -> Option<DateTime<Utc>> {
         if self.first_run.load(Ordering::SeqCst) {
             Some(self.created_at)
@@ -157,20 +208,20 @@ impl<S: Schedule> Schedule for Immediate<S> {
     }
 }
 
-impl<S: Schedule> From<S> for Immediate<S> {
+impl<S: SyncSchedule> From<S> for Immediate<S> {
     fn from(schedule: S) -> Self {
         Self::new(schedule)
     }
 }
 
 /// A schedule that runs a maximum number of times.
-pub struct LimitedRun<S: Schedule> {
+pub struct LimitedRun<S: SyncSchedule> {
     schedule: S,
     max_runs: u64,
     count: AtomicU64,
 }
 
-impl<S: Schedule> LimitedRun<S> {
+impl<S: SyncSchedule> LimitedRun<S> {
     pub fn new(schedule: S, max_runs: u64) -> Self {
         Self {
             schedule,
@@ -192,7 +243,7 @@ impl<S: Schedule> LimitedRun<S> {
     }
 }
 
-impl<S: Schedule> Schedule for LimitedRun<S> {
+impl<S: SyncSchedule> SyncSchedule for LimitedRun<S> {
     fn next(&self) -> Option<DateTime<Utc>> {
         if self.count.load(Ordering::SeqCst) >= self.max_runs {
             None
@@ -210,18 +261,18 @@ impl<S: Schedule> Schedule for LimitedRun<S> {
     }
 }
 
-pub struct NotBefore<S: Schedule> {
+pub struct NotBefore<S: SyncSchedule> {
     start: DateTime<Utc>,
     base: S,
 }
 
-impl<S: Schedule> NotBefore<S> {
+impl<S: SyncSchedule> NotBefore<S> {
     pub fn new(start: DateTime<Utc>, base: S) -> Self {
         Self { start, base }
     }
 }
 
-impl<S: Schedule> Schedule for NotBefore<S> {
+impl<S: SyncSchedule> SyncSchedule for NotBefore<S> {
     fn next(&self) -> Option<DateTime<Utc>> {
         if self.base.next().map_or(false, |x| x < self.start) {
             Some(self.start)
@@ -235,18 +286,18 @@ impl<S: Schedule> Schedule for NotBefore<S> {
     }
 }
 
-pub struct NotAfter<S: Schedule> {
+pub struct NotAfter<S: SyncSchedule> {
     end: DateTime<Utc>,
     base: S,
 }
 
-impl<S: Schedule> NotAfter<S> {
+impl<S: SyncSchedule> NotAfter<S> {
     pub fn new(end: DateTime<Utc>, base: S) -> Self {
         Self { end, base }
     }
 }
 
-impl<S: Schedule> Schedule for NotAfter<S> {
+impl<S: SyncSchedule> SyncSchedule for NotAfter<S> {
     fn next(&self) -> Option<DateTime<Utc>> {
         if self.base.next().map_or(false, |x| x > self.end) {
             None
@@ -260,13 +311,13 @@ impl<S: Schedule> Schedule for NotAfter<S> {
     }
 }
 
-pub struct DateRange<S: Schedule> {
+pub struct DateRange<S: SyncSchedule> {
     start: DateTime<Utc>,
     end: DateTime<Utc>,
     base: S,
 }
 
-impl<S: Schedule> DateRange<S> {
+impl<S: SyncSchedule> DateRange<S> {
     pub fn new(start: DateTime<Utc>, end: DateTime<Utc>, base: S) -> Result<Self, Error> {
         if end < start {
             Err(Error::InvalidDateRange { start, end })
@@ -276,7 +327,7 @@ impl<S: Schedule> DateRange<S> {
     }
 }
 
-impl<S: Schedule> Schedule for DateRange<S> {
+impl<S: SyncSchedule> SyncSchedule for DateRange<S> {
     fn next(&self) -> Option<DateTime<Utc>> {
         self.base
             .next()
@@ -291,7 +342,7 @@ impl<S: Schedule> Schedule for DateRange<S> {
 
 #[cfg(test)]
 mod tests {
-    use crate::scheduling::{Always, Schedule};
+    use crate::scheduling::{Always, SyncSchedule};
 
     use super::LimitedRun;
 

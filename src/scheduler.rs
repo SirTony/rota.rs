@@ -9,14 +9,14 @@ use std::{
 
 use log::{debug, trace};
 
-use tokio::{select, sync::RwLock, task::JoinHandle};
+use tokio::{sync::RwLock, task::JoinHandle};
 use tokio_util::sync::{CancellationToken, WaitForCancellationFutureOwned};
 use uuid::Uuid;
 
 use crate::{
     ext::FutureEx,
-    task::{ActiveTask, Handle, Id, ScheduledTask, TaskExecutable},
-    Error, Result,
+    task::{ActiveTask, Handle, Id, ScheduledTask},
+    Result,
 };
 
 pub struct Scheduler {
@@ -88,7 +88,7 @@ impl Scheduler {
 
                             for (id, task) in tasks.iter() {
                                 if !task.is_paused.load(Ordering::SeqCst)
-                                    && task.schedule.read().await.is_ready()
+                                    && task.schedule.is_ready().await
                                 {
                                     ids.push(*id);
                                 }
@@ -107,30 +107,17 @@ impl Scheduler {
                             let ct = ct.child_token();
                             let ct2 = ct.clone();
                             if let Some((id, task)) = tasks.remove_entry(&id) {
-                                let kind = task.exec.clone();
+                                let mut exec = task.exec.clone();
+                                let task2 = task.clone();
                                 let handle = tokio::spawn(async move {
-                                    match kind {
-                                        TaskExecutable::Sync(exec) => {
-                                            let mut exec = exec.lock().await;
-                                            match exec.execute(task_id, ct.clone()) {
-                                                Ok(x) => Ok(x),
-                                                Err(e) => Err(Error::Internal {
-                                                    id: task_id,
-                                                    error: e,
-                                                }),
+                                    match exec.execute(task_id, ct).await {
+                                        Ok(_) => {}
+                                        Err(e) => {
+                                            if let Some(mut callback) = task2.err_fn {
+                                                callback.on_error(task_id, e).await;
                                             }
                                         }
-                                        TaskExecutable::Async(exec) => {
-                                            let mut exec = exec.lock().await;
-                                            select! {
-                                                task_result = exec.execute(task_id, ct.clone()) => match task_result {
-                                                    Ok( x ) => Ok( x ),
-                                                    Err( e ) => Err( Error::Internal { id: task_id, error: e } )
-                                                },
-                                                _ = ct.cancelled() => Err( Error::Cancelled )
-                                            }
-                                        }
-                                    }
+                                    };
                                 });
 
                                 let task = ActiveTask {
@@ -177,9 +164,13 @@ impl Scheduler {
 
                         for id in ids.into_iter() {
                             debug!("cleaning up task {}", id);
-                            if let Some(task) = active.remove(&id) {
-                                task.task.schedule.write().await.advance();
-                                tasks.insert(id, task.task);
+                            if let Some(mut task) = active.remove(&id) {
+                                if task.task.schedule.is_finished().await {
+                                    std::mem::drop(task);
+                                } else {
+                                    task.task.schedule.advance().await;
+                                    tasks.insert(id, task.task);
+                                }
                             }
                         }
                     }
