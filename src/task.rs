@@ -7,6 +7,7 @@ use std::{
     },
 };
 
+use chrono::{DateTime, Utc};
 use tokio::{
     select,
     sync::{Mutex, RwLock},
@@ -128,12 +129,12 @@ pub(crate) enum TaskSchedule {
 }
 
 impl TaskSchedule {
-    // pub async fn next(&self) -> Option<DateTime<Utc>> {
-    //     match self {
-    //         TaskSchedule::Sync(x) => x.read().await.next(),
-    //         TaskSchedule::Async(x) => x.read().await.next().await,
-    //     }
-    // }
+    pub async fn next(&self) -> Option<DateTime<Utc>> {
+        match self {
+            TaskSchedule::Sync(x) => x.read().await.next(),
+            TaskSchedule::Async(x) => x.read().await.next().await,
+        }
+    }
 
     pub async fn advance(&mut self) {
         match self {
