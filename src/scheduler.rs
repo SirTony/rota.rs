@@ -19,6 +19,31 @@ use crate::{
     Result,
 };
 
+#[cfg(feature = "global")]
+use tokio::sync::{OnceCell, RwLockReadGuard, RwLockWriteGuard};
+
+#[cfg(feature = "global")]
+static GLOBAL_SCHEDULER: OnceCell<RwLock<Scheduler>> = OnceCell::const_new();
+
+#[cfg(feature = "global")]
+fn ensure_initialized() {
+    if !GLOBAL_SCHEDULER.initialized() {
+        let _ = GLOBAL_SCHEDULER.set(RwLock::new(Scheduler::new()));
+    }
+}
+
+#[cfg(feature = "global")]
+pub async fn get_scheduler<'read>() -> RwLockReadGuard<'read, Scheduler> {
+    ensure_initialized();
+    GLOBAL_SCHEDULER.get().unwrap().read().await
+}
+
+#[cfg(feature = "global")]
+pub async fn get_scheduler_mut<'write>() -> RwLockWriteGuard<'write, Scheduler> {
+    ensure_initialized();
+    GLOBAL_SCHEDULER.get().unwrap().write().await
+}
+
 pub struct Scheduler {
     waiting_tasks: Arc<RwLock<HashMap<Uuid, ScheduledTask>>>,
     active_tasks: Arc<RwLock<HashMap<Uuid, ActiveTask>>>,

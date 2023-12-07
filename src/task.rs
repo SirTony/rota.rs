@@ -7,7 +7,7 @@ use std::{
     },
 };
 
-use chrono::{DateTime, Utc};
+use async_trait::async_trait;
 use tokio::{
     select,
     sync::{Mutex, RwLock},
@@ -17,8 +17,6 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::scheduling::{AsyncSchedule, SyncSchedule};
-
-pub use async_trait::async_trait;
 
 pub type Error = Box<dyn std::error::Error + Send + Sync>;
 
@@ -129,12 +127,12 @@ pub(crate) enum TaskSchedule {
 }
 
 impl TaskSchedule {
-    pub async fn next(&self) -> Option<DateTime<Utc>> {
-        match self {
-            TaskSchedule::Sync(x) => x.read().await.next(),
-            TaskSchedule::Async(x) => x.read().await.next().await,
-        }
-    }
+    // pub async fn next(&self) -> Option<DateTime<Utc>> {
+    //     match self {
+    //         TaskSchedule::Sync(x) => x.read().await.next(),
+    //         TaskSchedule::Async(x) => x.read().await.next().await,
+    //     }
+    // }
 
     pub async fn advance(&mut self) {
         match self {
@@ -569,6 +567,16 @@ pub struct Handle {
 }
 
 impl Handle {
+    pub async fn name(&self) -> Option<Arc<String>> {
+        if let Some(task) = self.waiting.read().await.get(&self.id) {
+            task.name.clone()
+        } else if let Some(active) = self.active.read().await.get(&self.id) {
+            active.task.name.clone()
+        } else {
+            None
+        }
+    }
+
     pub async fn is_valid(&self) -> bool {
         self.waiting.read().await.contains_key(&self.id)
             || self.active.read().await.contains_key(&self.id)

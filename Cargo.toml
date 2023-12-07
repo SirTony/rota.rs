@@ -3,6 +3,10 @@ name = "rota"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+default = ["cron"]
+global = []
+
 [dependencies]
 async-trait = "0.1.74"
 chrono = "0.4.31"

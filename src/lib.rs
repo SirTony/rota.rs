@@ -9,6 +9,7 @@ use justerror::Error;
 use task::Id;
 
 pub use crate::scheduler::*;
+pub use async_trait::async_trait;
 pub use tokio_util::sync::CancellationToken;
 
 pub type Result<T> = std::result::Result<T, crate::Error>;
