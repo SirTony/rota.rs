@@ -9,15 +9,11 @@ use std::{
 
 use log::{debug, trace};
 
-use tokio::{sync::RwLock, task::JoinHandle};
+use tokio::{select, sync::RwLock, task::JoinHandle};
 use tokio_util::sync::{CancellationToken, WaitForCancellationFutureOwned};
 use uuid::Uuid;
 
-use crate::{
-    ext::FutureEx,
-    task::{ActiveTask, Handle, Id, ScheduledTask},
-    Result,
-};
+use crate::task::{Activity, Id, Task};
 
 #[cfg(feature = "global")]
 use tokio::sync::{OnceCell, RwLockReadGuard, RwLockWriteGuard};
@@ -45,12 +41,10 @@ pub async fn get_scheduler_mut<'write>() -> RwLockWriteGuard<'write, Scheduler> 
 }
 
 pub struct Scheduler {
-    waiting_tasks: Arc<RwLock<HashMap<Uuid, ScheduledTask>>>,
-    active_tasks: Arc<RwLock<HashMap<Uuid, ActiveTask>>>,
+    tasks: Arc<RwLock<HashMap<Uuid, Task>>>,
     ct: CancellationToken,
     is_running: Arc<AtomicBool>,
-    spawner: Option<JoinHandle<Result<()>>>,
-    cleaner: Option<JoinHandle<Result<()>>>,
+    spawner: Option<JoinHandle<()>>,
 }
 
 impl Default for Scheduler {
@@ -64,19 +58,17 @@ impl Scheduler {
 
     pub fn new() -> Self {
         Self {
-            waiting_tasks: Arc::new(RwLock::new(HashMap::new())),
-            active_tasks: Arc::new(RwLock::new(HashMap::new())),
+            tasks: Arc::new(RwLock::new(HashMap::new())),
             ct: CancellationToken::new(),
             is_running: Arc::new(AtomicBool::new(false)),
             spawner: None,
-            cleaner: None,
         }
     }
 
-    pub async fn add_task(&mut self, task: ScheduledTask) -> Id {
+    pub async fn add_task(&mut self, task: Task) -> Id {
         let id = self.generate_task_id().await;
         trace!("adding task {}", id);
-        self.waiting_tasks.write().await.insert(id, task);
+        self.tasks.write().await.insert(id, task);
 
         Id(id)
     }
@@ -92,126 +84,110 @@ impl Scheduler {
             if self.ct.is_cancelled() {
                 self.ct = CancellationToken::new();
             }
-            let tasks = self.waiting_tasks.clone();
-            let tasks2 = self.waiting_tasks.clone();
-            let active = self.active_tasks.clone();
-            let active2 = self.active_tasks.clone();
-            let ct = self.ct.clone();
-            let ct2 = ct.clone();
-            let is_running = self.is_running.clone();
-            let is_running2 = is_running.clone();
+        }
 
-            let spawner = tokio::spawn(async move {
-                trace!("launching spawner");
-                while !ct.is_cancelled() {
-                    if is_running.load(Ordering::SeqCst) {
-                        let mut tasks = tasks.write().await;
-                        let mut active = active.write().await;
+        let ct = self.ct.clone();
+        let is_running = self.is_running.clone();
+        let tasks = self.tasks.clone();
+        let child = self.ct.child_token();
 
-                        let ids = {
-                            let mut ids = Vec::new();
+        let spawner = tokio::spawn(async move {
+            trace!("launching spawner");
+            while !ct.is_cancelled() {
+                if is_running.load(Ordering::SeqCst) {
+                    let mut tasks = tasks.write().await;
+                    let mut to_remove = Vec::new();
 
-                            for (id, task) in tasks.iter() {
-                                if !task.is_paused.load(Ordering::SeqCst)
-                                    && task.schedule.is_ready().await
-                                {
-                                    ids.push(*id);
+                    for (id, task) in tasks.iter_mut() {
+                        match task.status().await {
+                            crate::task::Status::Invalid => {
+                                to_remove.push(*id);
+                            }
+                            crate::task::Status::Paused => {
+                                // continue ticking the schedule while paused
+                                let mut sched = task.schedule.write().await;
+                                if sched.is_ready().await {
+                                    sched.advance().await;
                                 }
                             }
+                            crate::task::Status::Ready => {
+                                debug!("spawning task {}", id);
 
-                            ids
-                        };
-
-                        if !ids.is_empty() {
-                            debug!("getting ready to spawn {} tasks", ids.len())
-                        }
-
-                        for id in ids.into_iter() {
-                            debug!("spawning task {}", id);
-                            let task_id = Id(id);
-                            let ct = ct.child_token();
-                            let ct2 = ct.clone();
-                            if let Some((id, task)) = tasks.remove_entry(&id) {
-                                let mut exec = task.exec.clone();
-                                let task2 = task.clone();
+                                let task = task.clone();
+                                let mut task2 = task.clone();
+                                let child = child.clone();
+                                let child2 = child.clone();
                                 let handle = tokio::spawn(async move {
-                                    match exec.execute(task_id, ct).await {
+                                    match task
+                                        .exec
+                                        .lock()
+                                        .await
+                                        .execute(task.clone(), child.clone())
+                                        .await
+                                    {
                                         Ok(_) => {}
                                         Err(e) => {
-                                            if let Some(mut callback) = task2.err_fn {
-                                                callback.on_error(task_id, e).await;
+                                            if let Some(ref callback) = task.err_fn {
+                                                callback
+                                                    .lock()
+                                                    .await
+                                                    .on_error(task.clone(), e)
+                                                    .await;
                                             }
                                         }
                                     };
                                 });
 
-                                let task = ActiveTask {
-                                    task,
-                                    handle,
-                                    ct: ct2,
-                                };
-                                active.insert(id, task);
+                                task2.activity = Some(Arc::new(Activity { handle, ct: child2 }));
+                            }
+                            crate::task::Status::Active => { /* do nothing */ }
+                            crate::task::Status::Finished => {
+                                std::mem::drop(task.activity.take());
+                                task.schedule.write().await.advance().await;
+                            }
+                            crate::task::Status::Cancelled => {
+                                if let Some(activity) = &task.activity {
+                                    activity.ct.cancel();
+                                    activity.handle.abort();
+                                }
+
+                                std::mem::drop(task.activity.take());
+                            }
+                            crate::task::Status::AwaitingRemoval => {
+                                if let Some(activity) = &task.activity {
+                                    activity.ct.cancel();
+                                    activity.handle.abort();
+                                }
+
+                                std::mem::drop(task.activity.take());
+                                to_remove.push(*id);
                             }
                         }
                     }
 
-                    tokio::time::sleep(Self::BACKGROUND_LOOP_DELAY)
-                        .with_cancellation(ct.clone())
-                        .await?;
-                }
-
-                trace!("terminating spawner");
-                Ok(())
-            });
-
-            let cleaner = tokio::spawn(async move {
-                trace!("launching cleaner");
-                while !ct2.is_cancelled() {
-                    if is_running2.load(Ordering::SeqCst) {
-                        let mut tasks = tasks2.write().await;
-                        let mut active = active2.write().await;
-
-                        let ids = {
-                            let mut ids = Vec::new();
-
-                            for (id, task) in active.iter() {
-                                if task.handle.is_finished() {
-                                    ids.push(*id);
-                                }
+                    for id in to_remove {
+                        if let Some(mut task) = tasks.remove(&id) {
+                            if let Some(activity) = task.activity.take() {
+                                activity.ct.cancel();
+                                activity.handle.abort();
                             }
 
-                            ids
-                        };
-
-                        if !ids.is_empty() {
-                            debug!("preparing to cleanup {} tasks", ids.len());
-                        }
-
-                        for id in ids.into_iter() {
-                            debug!("cleaning up task {}", id);
-                            if let Some(mut task) = active.remove(&id) {
-                                if task.task.schedule.is_finished().await {
-                                    std::mem::drop(task);
-                                } else {
-                                    task.task.schedule.advance().await;
-                                    tasks.insert(id, task.task);
-                                }
-                            }
+                            std::mem::drop(task);
                         }
                     }
-
-                    tokio::time::sleep(Self::BACKGROUND_LOOP_DELAY)
-                        .with_cancellation(ct2.clone())
-                        .await?;
                 }
-                trace!("terminating cleaner");
-                Ok(())
-            });
 
-            let _ = self.spawner.insert(spawner);
-            let _ = self.cleaner.insert(cleaner);
-            self.is_running.store(true, Ordering::SeqCst);
-        }
+                select! {
+                    _ = tokio::time::sleep(Self::BACKGROUND_LOOP_DELAY) => { continue; },
+                    _ = ct.cancelled() => { break; }
+                }
+            }
+
+            trace!("terminating spawner");
+        });
+
+        let _ = self.spawner.insert(spawner);
+        self.is_running.store(true, Ordering::SeqCst);
     }
 
     pub async fn stop(&mut self) {
@@ -219,9 +195,6 @@ impl Scheduler {
             trace!("Scheduler::stop()");
             self.is_running.store(false, Ordering::SeqCst);
             if let Some(handle) = self.spawner.take() {
-                handle.abort();
-            }
-            if let Some(handle) = self.cleaner.take() {
                 handle.abort();
             }
         }
@@ -232,13 +205,8 @@ impl Scheduler {
         self.stop().await;
         self.ct.cancel();
 
-        for (_, task) in self.waiting_tasks.write().await.drain() {
-            drop(task);
-        }
-
-        for (_, task) in self.active_tasks.write().await.drain() {
-            task.ct.cancel();
-            task.handle.abort();
+        for (_, mut task) in self.tasks.write().await.drain() {
+            task.cancel();
             drop(task);
         }
     }
@@ -248,27 +216,25 @@ impl Scheduler {
         self.ct.clone().cancelled_owned()
     }
 
-    pub async fn get_task(&self, Id(id): Id) -> Option<Handle> {
-        let waiting = self.waiting_tasks.read().await;
-        let active = self.active_tasks.read().await;
+    pub async fn get_task(&self, Id(id): Id) -> Option<Task> {
+        self.tasks.read().await.get(&id).cloned()
+    }
 
-        if waiting.contains_key(&id) || active.contains_key(&id) {
-            Some(Handle {
-                id,
-                waiting: self.waiting_tasks.clone(),
-                active: self.active_tasks.clone(),
-            })
-        } else {
-            None
-        }
+    pub async fn find_task_by_name<S: AsRef<str>>(&self, name: S) -> Option<Task> {
+        let name = name.as_ref();
+        self.tasks
+            .read()
+            .await
+            .values()
+            .filter(|x| x.name.is_some())
+            .find(|task| task.name.as_ref().unwrap().as_str() == name)
+            .cloned()
     }
 
     async fn generate_task_id(&self) -> Uuid {
         let mut id = Uuid::new_v4();
 
-        while self.active_tasks.read().await.contains_key(&id)
-            || self.waiting_tasks.read().await.contains_key(&id)
-        {
+        while self.tasks.read().await.contains_key(&id) {
             id = Uuid::new_v4();
         }
 

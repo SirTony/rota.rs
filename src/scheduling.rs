@@ -14,25 +14,8 @@ use cron::OwnedScheduleIterator;
 
 use crate::Error;
 
-pub trait SyncSchedule {
-    fn next(&self) -> Option<DateTime<Utc>>;
-    fn advance(&mut self);
-
-    fn is_ready(&self) -> bool {
-        if let Some(when) = self.next() {
-            Utc::now() >= when
-        } else {
-            false
-        }
-    }
-
-    fn is_finished(&self) -> bool {
-        self.next().is_none()
-    }
-}
-
 #[async_trait]
-pub trait AsyncSchedule {
+pub trait Schedule {
     async fn next(&self) -> Option<DateTime<Utc>>;
     async fn advance(&mut self);
 
@@ -52,24 +35,8 @@ pub trait AsyncSchedule {
 /// Defines a schedule that is always ready to execute.
 pub struct Always;
 
-impl SyncSchedule for Always {
-    fn next(&self) -> Option<DateTime<Utc>> {
-        Some(DateTime::<Utc>::MIN_UTC)
-    }
-
-    fn advance(&mut self) {}
-
-    fn is_ready(&self) -> bool {
-        true
-    }
-
-    fn is_finished(&self) -> bool {
-        false
-    }
-}
-
 #[async_trait]
-impl AsyncSchedule for Always {
+impl Schedule for Always {
     async fn next(&self) -> Option<DateTime<Utc>> {
         Some(DateTime::<Utc>::MIN_UTC)
     }
@@ -99,22 +66,8 @@ impl Interval {
     }
 }
 
-impl SyncSchedule for Interval {
-    fn next(&self) -> Option<DateTime<Utc>> {
-        Some(self.next)
-    }
-
-    fn advance(&mut self) {
-        self.next = Utc::now() + self.interval;
-    }
-
-    fn is_finished(&self) -> bool {
-        false
-    }
-}
-
 #[async_trait]
-impl AsyncSchedule for Interval {
+impl Schedule for Interval {
     async fn next(&self) -> Option<DateTime<Utc>> {
         Some(self.next)
     }
@@ -161,20 +114,9 @@ impl Cron {
     }
 }
 
-#[cfg(feature = "cron")]
-impl SyncSchedule for Cron {
-    fn next(&self) -> Option<DateTime<Utc>> {
-        self.next
-    }
-
-    fn advance(&mut self) {
-        self.next = self.it.next()
-    }
-}
-
 #[async_trait]
 #[cfg(feature = "cron")]
-impl AsyncSchedule for Cron {
+impl Schedule for Cron {
     async fn next(&self) -> Option<DateTime<Utc>> {
         self.next
     }
@@ -184,69 +126,15 @@ impl AsyncSchedule for Cron {
     }
 }
 
-// pub struct Immediate;
-
-// impl Immediate {
-//     pub fn new_sync<S: SyncSchedule>( schedule: S ) -> ImmediateSync<S> {
-//         ImmediateSync::new(schedule)
-//     }
-
-//     pub fn new_async<S: AsyncSchedule + Send + Sync + 'static>( schedule: S ) -> ImmediateAsync<S> {
-//         ImmediateAsync::new(schedule)
-//     }
-// }
-
-/// A sync schedule that is ready immediately.
-/// After the initial run, the underlying schedule is followed.
-pub struct ImmediateSync<S: SyncSchedule> {
-    schedule: S,
-    first_run: AtomicBool,
-    created_at: DateTime<Utc>,
-}
-
-impl<S: SyncSchedule> ImmediateSync<S> {
-    pub fn new(schedule: S) -> Self {
-        Self {
-            schedule,
-            first_run: AtomicBool::new(true),
-            created_at: Utc::now(),
-        }
-    }
-}
-
-impl<S: SyncSchedule> SyncSchedule for ImmediateSync<S> {
-    fn next(&self) -> Option<DateTime<Utc>> {
-        if self.first_run.load(Ordering::SeqCst) {
-            Some(self.created_at)
-        } else {
-            self.schedule.next()
-        }
-    }
-
-    fn advance(&mut self) {
-        if self.first_run.load(Ordering::SeqCst) {
-            self.first_run.store(false, Ordering::SeqCst)
-        } else {
-            self.schedule.advance()
-        }
-    }
-}
-
-impl<S: SyncSchedule> From<S> for ImmediateSync<S> {
-    fn from(schedule: S) -> Self {
-        Self::new(schedule)
-    }
-}
-
 /// An async schedule that is ready immediately.
 /// After the initial run, the underlying schedule is followed.
-pub struct ImmediateAsync<S: AsyncSchedule + Send + Sync + 'static> {
+pub struct Immediate<S: Schedule + Send + Sync + 'static> {
     schedule: S,
     first_run: AtomicBool,
     created_at: DateTime<Utc>,
 }
 
-impl<S: AsyncSchedule + Send + Sync + 'static> ImmediateAsync<S> {
+impl<S: Schedule + Send + Sync + 'static> Immediate<S> {
     pub fn new(schedule: S) -> Self {
         Self {
             schedule,
@@ -257,7 +145,7 @@ impl<S: AsyncSchedule + Send + Sync + 'static> ImmediateAsync<S> {
 }
 
 #[async_trait]
-impl<S: AsyncSchedule + Send + Sync + 'static> AsyncSchedule for ImmediateAsync<S> {
+impl<S: Schedule + Send + Sync + 'static> Schedule for Immediate<S> {
     async fn next(&self) -> Option<DateTime<Utc>> {
         if self.first_run.load(Ordering::SeqCst) {
             Some(self.created_at)
@@ -275,67 +163,20 @@ impl<S: AsyncSchedule + Send + Sync + 'static> AsyncSchedule for ImmediateAsync<
     }
 }
 
-impl<S: AsyncSchedule + Send + Sync + 'static> From<S> for ImmediateAsync<S> {
+impl<S: Schedule + Send + Sync + 'static> From<S> for Immediate<S> {
     fn from(schedule: S) -> Self {
         Self::new(schedule)
     }
 }
 
 /// A schedule that runs a maximum number of times.
-pub struct LimitedRunSync<S: SyncSchedule> {
+pub struct LimitedRun<S: Schedule + Send + Sync> {
     schedule: S,
     max_runs: u64,
     count: AtomicU64,
 }
 
-impl<S: SyncSchedule> LimitedRunSync<S> {
-    pub fn new(schedule: S, max_runs: u64) -> Self {
-        Self {
-            schedule,
-            max_runs,
-            count: AtomicU64::new(0),
-        }
-    }
-
-    pub fn once(schedule: S) -> Self {
-        Self::new(schedule, 1)
-    }
-
-    pub fn twice(schedule: S) -> Self {
-        Self::new(schedule, 2)
-    }
-
-    pub fn thrice(schedule: S) -> Self {
-        Self::new(schedule, 3)
-    }
-}
-
-impl<S: SyncSchedule> SyncSchedule for LimitedRunSync<S> {
-    fn next(&self) -> Option<DateTime<Utc>> {
-        if self.count.load(Ordering::SeqCst) >= self.max_runs {
-            None
-        } else {
-            self.schedule.next()
-        }
-    }
-
-    fn advance(&mut self) {
-        let count = self.count.load(Ordering::SeqCst);
-        if count < self.max_runs {
-            self.count.store(count + 1, Ordering::SeqCst);
-            self.schedule.advance();
-        }
-    }
-}
-
-/// A schedule that runs a maximum number of times.
-pub struct LimitedRunAsync<S: AsyncSchedule + Send + Sync> {
-    schedule: S,
-    max_runs: u64,
-    count: AtomicU64,
-}
-
-impl<S: AsyncSchedule + Send + Sync> LimitedRunAsync<S> {
+impl<S: Schedule + Send + Sync> LimitedRun<S> {
     pub fn new(schedule: S, max_runs: u64) -> Self {
         Self {
             schedule,
@@ -358,7 +199,7 @@ impl<S: AsyncSchedule + Send + Sync> LimitedRunAsync<S> {
 }
 
 #[async_trait]
-impl<S: AsyncSchedule + Send + Sync> AsyncSchedule for LimitedRunAsync<S> {
+impl<S: Schedule + Send + Sync> Schedule for LimitedRun<S> {
     async fn next(&self) -> Option<DateTime<Utc>> {
         if self.count.load(Ordering::SeqCst) >= self.max_runs {
             None
@@ -376,44 +217,19 @@ impl<S: AsyncSchedule + Send + Sync> AsyncSchedule for LimitedRunAsync<S> {
     }
 }
 
-pub struct NotBeforeSync<S: SyncSchedule> {
+pub struct NotBefore<S: Schedule + Send + Sync + 'static> {
     start: DateTime<Utc>,
     base: S,
 }
 
-impl<S: SyncSchedule> NotBeforeSync<S> {
-    pub fn new(start: DateTime<Utc>, base: S) -> Self {
-        Self { start, base }
-    }
-}
-
-impl<S: SyncSchedule> SyncSchedule for NotBeforeSync<S> {
-    fn next(&self) -> Option<DateTime<Utc>> {
-        if self.base.next().map_or(false, |x| x < self.start) {
-            Some(self.start)
-        } else {
-            self.base.next()
-        }
-    }
-
-    fn advance(&mut self) {
-        self.base.advance()
-    }
-}
-
-pub struct NotBeforeAsync<S: AsyncSchedule + Send + Sync + 'static> {
-    start: DateTime<Utc>,
-    base: S,
-}
-
-impl<S: AsyncSchedule + Send + Sync + 'static> NotBeforeAsync<S> {
+impl<S: Schedule + Send + Sync + 'static> NotBefore<S> {
     pub fn new(start: DateTime<Utc>, base: S) -> Self {
         Self { start, base }
     }
 }
 
 #[async_trait]
-impl<S: AsyncSchedule + Send + Sync + 'static> AsyncSchedule for NotBeforeAsync<S> {
+impl<S: Schedule + Send + Sync + 'static> Schedule for NotBefore<S> {
     async fn next(&self) -> Option<DateTime<Utc>> {
         if self.base.next().await.map_or(false, |x| x < self.start) {
             Some(self.start)
@@ -427,44 +243,19 @@ impl<S: AsyncSchedule + Send + Sync + 'static> AsyncSchedule for NotBeforeAsync<
     }
 }
 
-pub struct NotAfterSync<S: SyncSchedule> {
+pub struct NotAfter<S: Schedule> {
     end: DateTime<Utc>,
     base: S,
 }
 
-impl<S: SyncSchedule> NotAfterSync<S> {
-    pub fn new(end: DateTime<Utc>, base: S) -> Self {
-        Self { end, base }
-    }
-}
-
-impl<S: SyncSchedule> SyncSchedule for NotAfterSync<S> {
-    fn next(&self) -> Option<DateTime<Utc>> {
-        if self.base.next().map_or(false, |x| x > self.end) {
-            None
-        } else {
-            self.base.next()
-        }
-    }
-
-    fn advance(&mut self) {
-        self.base.advance()
-    }
-}
-
-pub struct NotAfterAsync<S: AsyncSchedule> {
-    end: DateTime<Utc>,
-    base: S,
-}
-
-impl<S: AsyncSchedule + Send + Sync + 'static> NotAfterAsync<S> {
+impl<S: Schedule + Send + Sync + 'static> NotAfter<S> {
     pub fn new(end: DateTime<Utc>, base: S) -> Self {
         Self { end, base }
     }
 }
 
 #[async_trait]
-impl<S: AsyncSchedule + Send + Sync + 'static> AsyncSchedule for NotAfterAsync<S> {
+impl<S: Schedule + Send + Sync + 'static> Schedule for NotAfter<S> {
     async fn next(&self) -> Option<DateTime<Utc>> {
         if self.base.next().await.map_or(false, |x| x > self.end) {
             None
@@ -478,42 +269,13 @@ impl<S: AsyncSchedule + Send + Sync + 'static> AsyncSchedule for NotAfterAsync<S
     }
 }
 
-pub struct DateRangeSync<S: SyncSchedule> {
+pub struct DateRange<S: Schedule + Send + Sync + 'static> {
     start: DateTime<Utc>,
     end: DateTime<Utc>,
     base: S,
 }
 
-impl<S: SyncSchedule> DateRangeSync<S> {
-    pub fn new(start: DateTime<Utc>, end: DateTime<Utc>, base: S) -> Result<Self, Error> {
-        if end < start {
-            Err(Error::InvalidDateRange { start, end })
-        } else {
-            Ok(Self { start, end, base })
-        }
-    }
-}
-
-impl<S: SyncSchedule> SyncSchedule for DateRangeSync<S> {
-    fn next(&self) -> Option<DateTime<Utc>> {
-        self.base
-            .next()
-            .map(|x| x.max(self.start))
-            .map(|x| x.min(self.end))
-    }
-
-    fn advance(&mut self) {
-        self.base.advance()
-    }
-}
-
-pub struct DateRangeAsync<S: AsyncSchedule + Send + Sync + 'static> {
-    start: DateTime<Utc>,
-    end: DateTime<Utc>,
-    base: S,
-}
-
-impl<S: AsyncSchedule + Send + Sync + 'static> DateRangeAsync<S> {
+impl<S: Schedule + Send + Sync + 'static> DateRange<S> {
     pub fn new(start: DateTime<Utc>, end: DateTime<Utc>, base: S) -> Result<Self, Error> {
         if end < start {
             Err(Error::InvalidDateRange { start, end })
@@ -524,7 +286,7 @@ impl<S: AsyncSchedule + Send + Sync + 'static> DateRangeAsync<S> {
 }
 
 #[async_trait]
-impl<S: AsyncSchedule + Send + Sync + 'static> AsyncSchedule for DateRangeAsync<S> {
+impl<S: Schedule + Send + Sync + 'static> Schedule for DateRange<S> {
     async fn next(&self) -> Option<DateTime<Utc>> {
         self.base
             .next()
@@ -540,22 +302,22 @@ impl<S: AsyncSchedule + Send + Sync + 'static> AsyncSchedule for DateRangeAsync<
 
 #[cfg(test)]
 mod tests {
-    use crate::scheduling::{Always, SyncSchedule};
+    use crate::scheduling::{Always, Schedule};
 
-    use super::LimitedRunSync;
+    use super::LimitedRun;
 
-    #[test]
-    fn always() {
+    #[tokio::test]
+    async fn always() {
         let s = Always;
-        assert!(s.is_ready(), "always not ready");
-        assert!(!s.is_finished(), "always is finished");
+        assert!(s.is_ready().await, "always not ready");
+        assert!(!s.is_finished().await, "always is finished");
     }
 
-    #[test]
-    fn once() {
-        let mut s = LimitedRunSync::once(Always);
-        assert!(s.is_ready(), "once is not ready");
-        s.advance();
-        assert!(s.is_finished(), "once is not finished");
+    #[tokio::test]
+    async fn once() {
+        let mut s = LimitedRun::once(Always);
+        assert!(s.is_ready().await, "once is not ready");
+        s.advance().await;
+        assert!(s.is_finished().await, "once is not finished");
     }
 }

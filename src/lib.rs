@@ -1,12 +1,9 @@
-mod ext;
-
 pub mod scheduler;
 pub mod scheduling;
 pub mod task;
 
 use chrono::{DateTime, Utc};
 use justerror::Error;
-use task::Id;
 
 pub use crate::scheduler::*;
 pub use async_trait::async_trait;
@@ -23,29 +20,8 @@ pub enum Error {
         cron::error::Error,
     ),
 
-    #[error(desc = "the scheduler is already initialized")]
-    AlreadyInitialized,
-
-    #[error(desc = "the scheduler hasn't been initialized yet")]
-    NotInitialized,
-
-    #[error(desc = "the scheduler has been shut down")]
-    Terminated,
-
-    #[error(desc = "the scheduler has not been started")]
-    NotStarted,
-
-    #[error(desc = "the scheduler has not been stopped")]
-    AlreadyRunning,
-
     #[error(desc = "the cancellation signal was raised")]
     Cancelled,
-
-    #[error(desc = "requested task was not found")]
-    TaskNotFound(uuid::Uuid),
-
-    #[error(desc = "error in {id}: {error}")]
-    Internal { id: Id, error: crate::task::Error },
 
     #[error(desc = "the given chrono::Duration contains an invalid value: {0}")]
     InvalidInterval(#[from] chrono::OutOfRangeError),

@@ -1,5 +1,4 @@
 use std::{
-    collections::HashMap,
     future::Future,
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -14,9 +13,10 @@ use tokio::{
     task::JoinHandle,
 };
 use tokio_util::sync::CancellationToken;
+
 use uuid::Uuid;
 
-use crate::scheduling::{AsyncSchedule, SyncSchedule};
+use crate::scheduling::Schedule;
 
 pub type Error = Box<dyn std::error::Error + Send + Sync>;
 
@@ -25,134 +25,41 @@ pub type Error = Box<dyn std::error::Error + Send + Sync>;
 pub type Result = std::result::Result<(), Error>;
 
 /// Implementing this for any arbitrary `struct` or `enum` will allow it to be added to the task scheduler.
-/// This trait is for tasks that contain no `async` code. If an `async` context is needed, implement [AsyncExecutable] instead.
-pub trait SyncExecutable {
-    /// Contains the logic of the task that will be run by the scheduler at the appropriate time.
-    /// # Arguments
-    fn execute(&mut self, id: Id, ct: CancellationToken) -> Result;
-}
-
-/// Implementing this for any arbitrary `struct` or `enum` will allow it to be added to the task scheduler.
 /// This trait is for tasks that contain `async` code. If an `async` context is not needed, implement [SyncExecutable] instead.
 #[async_trait]
 pub trait AsyncExecutable {
-    async fn execute(&mut self, id: Id, ct: CancellationToken) -> Result;
-}
-
-impl<F: 'static + Send + Sync + FnMut(Id, CancellationToken) -> Result> SyncExecutable for F {
-    fn execute(&mut self, id: Id, ct: CancellationToken) -> Result {
-        (*self)(id, ct)
-    }
+    async fn execute(&mut self, task: Task, ct: CancellationToken) -> Result;
 }
 
 #[async_trait]
 impl<Fun, Fut> AsyncExecutable for Fun
 where
-    Fun: 'static + Send + Sync + FnMut(Id, CancellationToken) -> Fut,
+    Fun: 'static + Send + Sync + FnMut(Task, CancellationToken) -> Fut,
     Fut: Future<Output = Result> + Send + Sync,
 {
-    async fn execute(&mut self, id: Id, ct: CancellationToken) -> Result {
+    async fn execute(&mut self, task: Task, ct: CancellationToken) -> Result {
         let c_ct = ct.clone();
 
         select! {
-            task_result = (*self)(id, ct) => task_result,
+            task_result = (*self)(task, ct) => task_result,
             _ = c_ct.cancelled() => Err( crate::Error::Cancelled.into() ),
         }
     }
 }
 
-#[derive(Clone)]
-pub(crate) enum TaskExecutable {
-    Sync(Arc<Mutex<dyn SyncExecutable + Send + Sync>>),
-    Async(Arc<Mutex<dyn AsyncExecutable + Send + Sync>>),
-}
-
-impl TaskExecutable {
-    pub async fn execute(&mut self, id: Id, ct: CancellationToken) -> Result {
-        match self {
-            TaskExecutable::Sync(x) => x.lock().await.execute(id, ct),
-            TaskExecutable::Async(x) => x.lock().await.execute(id, ct).await,
-        }
-    }
-}
-
-pub trait SyncErrorCallback {
-    fn on_error(&mut self, id: Id, e: Error);
-}
-
-impl<Fun> SyncErrorCallback for Fun
-where
-    Fun: FnMut(Id, Error),
-{
-    fn on_error(&mut self, id: Id, e: Error) {
-        (*self)(id, e)
-    }
-}
-
 #[async_trait]
 pub trait AsyncErrorCallback {
-    async fn on_error(&mut self, id: Id, e: Error);
+    async fn on_error(&mut self, task: Task, e: Error);
 }
 
 #[async_trait]
 impl<Fun, Fut> AsyncErrorCallback for Fun
 where
-    Fun: Send + Sync + 'static + FnMut(Id, Error) -> Fut,
+    Fun: Send + Sync + 'static + FnMut(Task, Error) -> Fut,
     Fut: Send + Sync + 'static + Future<Output = ()>,
 {
-    async fn on_error(&mut self, id: Id, e: Error) {
-        (*self)(id, e).await
-    }
-}
-
-#[derive(Clone)]
-pub(crate) enum TaskErrorFn {
-    Sync(Arc<Mutex<dyn SyncErrorCallback + Send + Sync>>),
-    Async(Arc<Mutex<dyn AsyncErrorCallback + Send + Sync>>),
-}
-
-impl TaskErrorFn {
-    pub async fn on_error(&mut self, id: Id, e: Error) {
-        match self {
-            TaskErrorFn::Sync(x) => x.lock().await.on_error(id, e),
-            TaskErrorFn::Async(x) => x.lock().await.on_error(id, e).await,
-        }
-    }
-}
-
-#[derive(Clone)]
-pub(crate) enum TaskSchedule {
-    Sync(Arc<RwLock<dyn SyncSchedule + Send + Sync>>),
-    Async(Arc<RwLock<dyn AsyncSchedule + Send + Sync>>),
-}
-
-impl TaskSchedule {
-    // pub async fn next(&self) -> Option<DateTime<Utc>> {
-    //     match self {
-    //         TaskSchedule::Sync(x) => x.read().await.next(),
-    //         TaskSchedule::Async(x) => x.read().await.next().await,
-    //     }
-    // }
-
-    pub async fn advance(&mut self) {
-        match self {
-            TaskSchedule::Sync(x) => x.write().await.advance(),
-            TaskSchedule::Async(x) => x.write().await.advance().await,
-        }
-    }
-
-    pub async fn is_ready(&self) -> bool {
-        match self {
-            TaskSchedule::Sync(x) => x.read().await.is_ready(),
-            TaskSchedule::Async(x) => x.read().await.is_ready().await,
-        }
-    }
-
-    pub async fn is_finished(&self) -> bool {
-        match self {
-            TaskSchedule::Sync(x) => x.read().await.is_finished(),
-            TaskSchedule::Async(x) => x.read().await.is_finished().await,
-        }
+    async fn on_error(&mut self, task: Task, e: Error) {
+        (*self)(task, e).await
     }
 }
 
@@ -179,33 +86,21 @@ pub struct TaskBuilder<
     const __HAS_ERR_FN: bool = false,
     const __HAS_NAME: bool = false,
 > {
-    exec: Option<TaskExecutable>,
-    schedule: Option<TaskSchedule>,
-    err_fn: Option<TaskErrorFn>,
+    exec: Option<Arc<Mutex<dyn AsyncExecutable + Send + Sync>>>,
+    schedule: Option<Arc<RwLock<dyn Schedule + Send + Sync>>>,
+    err_fn: Option<Arc<Mutex<dyn AsyncErrorCallback + Send + Sync>>>,
     name: Option<String>,
 }
 
 impl<const __HAS_SCHEDULE: bool, const __HAS_ERR_FN: bool, const __HAS_NAME: bool>
     TaskBuilder<false, __HAS_SCHEDULE, __HAS_ERR_FN, __HAS_NAME>
 {
-    pub fn sync_executable<E: SyncExecutable + Send + Sync + 'static>(
+    pub fn executable<E: AsyncExecutable + Send + Sync + 'static>(
         self,
         exec: E,
     ) -> TaskBuilder<true, __HAS_SCHEDULE, __HAS_ERR_FN, __HAS_NAME> {
         TaskBuilder::<true, __HAS_SCHEDULE, __HAS_ERR_FN, __HAS_NAME> {
-            exec: Some(TaskExecutable::Sync(Arc::new(Mutex::new(exec)))),
-            schedule: self.schedule,
-            err_fn: self.err_fn,
-            name: self.name,
-        }
-    }
-
-    pub fn async_executable<E: AsyncExecutable + Send + Sync + 'static>(
-        self,
-        exec: E,
-    ) -> TaskBuilder<true, __HAS_SCHEDULE, __HAS_ERR_FN, __HAS_NAME> {
-        TaskBuilder::<true, __HAS_SCHEDULE, __HAS_ERR_FN, __HAS_NAME> {
-            exec: Some(TaskExecutable::Async(Arc::new(Mutex::new(exec)))),
+            exec: Some(Arc::new(Mutex::new(exec))),
             schedule: self.schedule,
             err_fn: self.err_fn,
             name: self.name,
@@ -216,29 +111,13 @@ impl<const __HAS_SCHEDULE: bool, const __HAS_ERR_FN: bool, const __HAS_NAME: boo
 impl<const __HAS_EXEC: bool, const __HAS_ERR_FN: bool, const __HAS_NAME: bool>
     TaskBuilder<__HAS_EXEC, false, __HAS_ERR_FN, __HAS_NAME>
 {
-    pub fn sync_schedule<S: SyncSchedule + Send + Sync + 'static>(
+    pub fn schedule<S: Schedule + Send + Sync + 'static>(
         self,
         schedule: S,
     ) -> TaskBuilder<__HAS_EXEC, true, __HAS_ERR_FN, __HAS_NAME> {
         TaskBuilder::<__HAS_EXEC, true, __HAS_ERR_FN, __HAS_NAME> {
             exec: self.exec,
-            schedule: Some(TaskSchedule::Sync(Arc::new(RwLock::new(schedule)))),
-            err_fn: self.err_fn,
-            name: self.name,
-        }
-    }
-}
-
-impl<const __HAS_EXEC: bool, const __HAS_ERR_FN: bool, const __HAS_NAME: bool>
-    TaskBuilder<__HAS_EXEC, false, __HAS_ERR_FN, __HAS_NAME>
-{
-    pub fn async_schedule<S: AsyncSchedule + Send + Sync + 'static>(
-        self,
-        schedule: S,
-    ) -> TaskBuilder<__HAS_EXEC, true, __HAS_ERR_FN, __HAS_NAME> {
-        TaskBuilder::<__HAS_EXEC, true, __HAS_ERR_FN, __HAS_NAME> {
-            exec: self.exec,
-            schedule: Some(TaskSchedule::Async(Arc::new(RwLock::new(schedule)))),
+            schedule: Some(Arc::new(RwLock::new(schedule))),
             err_fn: self.err_fn,
             name: self.name,
         }
@@ -248,38 +127,14 @@ impl<const __HAS_EXEC: bool, const __HAS_ERR_FN: bool, const __HAS_NAME: bool>
 impl<const __HAS_EXEC: bool, const __HAS_SCHEDULE: bool, const __HAS_NAME: bool>
     TaskBuilder<__HAS_EXEC, __HAS_SCHEDULE, false, __HAS_NAME>
 {
-    // TODO - we need an async variant of this
-    pub fn on_error_sync<Fun>(
-        self,
-        f: Fun,
-    ) -> TaskBuilder<__HAS_EXEC, __HAS_SCHEDULE, true, __HAS_NAME>
-    where
-        Fun: SyncErrorCallback + Send + Sync + 'static,
-    {
-        TaskBuilder::<__HAS_EXEC, __HAS_SCHEDULE, true, __HAS_NAME> {
-            exec: self.exec,
-            schedule: self.schedule,
-            err_fn: Some(TaskErrorFn::Sync(Arc::new(Mutex::new(f)))),
-            name: self.name,
-        }
-    }
-}
-
-impl<const __HAS_EXEC: bool, const __HAS_SCHEDULE: bool, const __HAS_NAME: bool>
-    TaskBuilder<__HAS_EXEC, __HAS_SCHEDULE, false, __HAS_NAME>
-{
-    // TODO - we need an async variant of this
-    pub fn on_error_async<Fun, Fut>(
-        self,
-        f: Fun,
-    ) -> TaskBuilder<__HAS_EXEC, __HAS_SCHEDULE, true, __HAS_NAME>
+    pub fn on_error<Fun>(self, f: Fun) -> TaskBuilder<__HAS_EXEC, __HAS_SCHEDULE, true, __HAS_NAME>
     where
         Fun: AsyncErrorCallback + Send + Sync + 'static,
     {
         TaskBuilder::<__HAS_EXEC, __HAS_SCHEDULE, true, __HAS_NAME> {
             exec: self.exec,
             schedule: self.schedule,
-            err_fn: Some(TaskErrorFn::Async(Arc::new(Mutex::new(f)))),
+            err_fn: Some(Arc::new(Mutex::new(f))),
             name: self.name,
         }
     }
@@ -288,7 +143,7 @@ impl<const __HAS_EXEC: bool, const __HAS_SCHEDULE: bool, const __HAS_NAME: bool>
 impl<const __HAS_EXEC: bool, const __HAS_SCHEDULE: bool, const __HAS_ERR_FN: bool>
     TaskBuilder<__HAS_EXEC, __HAS_SCHEDULE, __HAS_ERR_FN, false>
 {
-    pub fn name<S: ToString>(
+    pub fn name<S: Into<String>>(
         self,
         name: S,
     ) -> TaskBuilder<__HAS_EXEC, __HAS_SCHEDULE, __HAS_ERR_FN, true> {
@@ -296,7 +151,7 @@ impl<const __HAS_EXEC: bool, const __HAS_SCHEDULE: bool, const __HAS_ERR_FN: boo
             exec: self.exec,
             schedule: self.schedule,
             err_fn: self.err_fn,
-            name: Some(name.to_string()),
+            name: Some(name.into()),
         }
     }
 }
@@ -304,8 +159,8 @@ impl<const __HAS_EXEC: bool, const __HAS_SCHEDULE: bool, const __HAS_ERR_FN: boo
 impl<const __HAS_ERR_FN: bool, const __HAS_NAME: bool>
     TaskBuilder<true, true, __HAS_ERR_FN, __HAS_NAME>
 {
-    pub fn build(self) -> ScheduledTask {
-        ScheduledTask {
+    pub fn build(self) -> Task {
+        Task {
             exec: self
                 .exec
                 .expect("the maintainer forgot to set the exec field"),
@@ -315,8 +170,26 @@ impl<const __HAS_ERR_FN: bool, const __HAS_NAME: bool>
             err_fn: self.err_fn,
             name: self.name.map(Arc::new),
             is_paused: Arc::new(AtomicBool::new(false)),
+            is_valid: Arc::new(AtomicBool::new(false)),
+            should_remove: Arc::new(AtomicBool::new(false)),
+            activity: None,
         }
     }
+}
+
+pub(crate) struct Activity {
+    pub handle: JoinHandle<()>,
+    pub ct: CancellationToken,
+}
+
+pub enum Status {
+    Invalid,
+    Paused,
+    Ready,
+    Active,
+    Finished,
+    Cancelled,
+    AwaitingRemoval,
 }
 
 #[derive(Clone)]
@@ -326,15 +199,18 @@ impl<const __HAS_ERR_FN: bool, const __HAS_NAME: bool>
 /// Tasks may be created from user-defined `struct`s or functions (including anonymous functions). See [`Task::new_sync()`] or [`Task::new_async()`] for examples.
 /// Because functions don't carry state beyond what they capture from their local scope or global variables, it is recommended to use a `struct` if persistent state is needed.
 /// Tasks also may not return data (beyond error states), so if passing data around is needed it is recommended to use channels.
-pub struct ScheduledTask {
-    pub(crate) exec: TaskExecutable,
-    pub(crate) schedule: TaskSchedule,
-    pub(crate) err_fn: Option<TaskErrorFn>,
+pub struct Task {
+    pub(crate) exec: Arc<Mutex<dyn AsyncExecutable + Send + Sync>>,
+    pub(crate) schedule: Arc<RwLock<dyn Schedule + Send + Sync>>,
+    pub(crate) err_fn: Option<Arc<Mutex<dyn AsyncErrorCallback + Send + Sync>>>,
     pub(crate) name: Option<Arc<String>>,
     pub(crate) is_paused: Arc<AtomicBool>,
+    pub(crate) is_valid: Arc<AtomicBool>,
+    pub(crate) should_remove: Arc<AtomicBool>,
+    pub(crate) activity: Option<Arc<Activity>>,
 }
 
-impl ScheduledTask {
+impl Task {
     pub fn builder() -> TaskBuilder {
         TaskBuilder {
             exec: None,
@@ -343,9 +219,80 @@ impl ScheduledTask {
             name: None,
         }
     }
+
+    pub async fn status(&self) -> Status {
+        if !self.is_valid.load(Ordering::SeqCst) && !self.should_remove.load(Ordering::SeqCst) {
+            Status::Invalid
+        } else if self.is_paused.load(Ordering::SeqCst) {
+            Status::Paused
+        } else if self.should_remove.load(Ordering::SeqCst)
+            || self.schedule.read().await.is_finished().await
+        {
+            Status::AwaitingRemoval
+        } else if let Some(activity) = &self.activity {
+            if activity.ct.is_cancelled() {
+                Status::Cancelled
+            } else if activity.handle.is_finished() {
+                Status::Finished
+            } else {
+                Status::Active
+            }
+        } else if self.schedule.read().await.is_ready().await
+            && !self.is_paused.load(Ordering::SeqCst)
+            && self.activity.is_none()
+            && !self.should_remove.load(Ordering::SeqCst)
+        {
+            Status::Ready
+        } else {
+            Status::Invalid
+        }
+    }
+
+    pub fn name(&self) -> Option<String> {
+        self.name.as_ref().map(|name| name.to_string())
+    }
+
+    pub fn pause(&self) {
+        self.is_paused.store(true, Ordering::SeqCst)
+    }
+
+    pub fn resume(&self) {
+        self.is_paused.store(false, Ordering::SeqCst)
+    }
+
+    pub fn cancel(&mut self) {
+        if let Some(activity) = self.activity.take() {
+            activity.ct.cancel();
+            activity.handle.abort();
+        }
+    }
+
+    pub async fn remove(&mut self) {
+        self.pause();
+        self.cancel();
+
+        self.should_remove.store(true, Ordering::SeqCst);
+        self.is_valid.store(false, Ordering::SeqCst);
+    }
+
+    pub fn is_valid(&self) -> bool {
+        self.is_valid.load(Ordering::SeqCst)
+    }
+
+    pub async fn is_ready(&self) -> bool {
+        self.schedule.read().await.is_ready().await
+    }
+
+    pub async fn is_finished(&self) -> bool {
+        self.schedule.read().await.is_finished().await
+    }
+
+    pub async fn is_active(&self) -> bool {
+        self.is_valid() && self.activity.is_some()
+    }
 }
 
-impl ScheduledTask {
+impl Task {
     // / Creates a new task that executes synchronously.
     // /
     // / The scheduler will spawn a new thread for the task when it is run; this function provides a means to create tasks that don't use `async`/`await`.
@@ -538,108 +485,11 @@ impl ScheduledTask {
     // }
 }
 
-pub(crate) struct ActiveTask {
-    pub handle: JoinHandle<()>,
-    pub ct: CancellationToken,
-    pub task: ScheduledTask,
-}
-
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+#[derive(Copy, Clone, Eq, PartialEq, Hash, Debug)]
 pub struct Id(pub(crate) Uuid);
 
 impl std::fmt::Display for Id {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Task({})", self.0)
-    }
-}
-
-impl From<Handle> for Id {
-    fn from(value: Handle) -> Self {
-        Self(value.id)
-    }
-}
-
-#[derive(Clone)]
-pub struct Handle {
-    pub(crate) id: Uuid,
-    pub(crate) waiting: Arc<RwLock<HashMap<Uuid, ScheduledTask>>>,
-    pub(crate) active: Arc<RwLock<HashMap<Uuid, ActiveTask>>>,
-}
-
-impl Handle {
-    pub async fn name(&self) -> Option<Arc<String>> {
-        if let Some(task) = self.waiting.read().await.get(&self.id) {
-            task.name.clone()
-        } else if let Some(active) = self.active.read().await.get(&self.id) {
-            active.task.name.clone()
-        } else {
-            None
-        }
-    }
-
-    pub async fn is_valid(&self) -> bool {
-        self.waiting.read().await.contains_key(&self.id)
-            || self.active.read().await.contains_key(&self.id)
-    }
-
-    pub async fn is_ready(&self) -> bool {
-        if let Some(task) = self.waiting.read().await.get(&self.id) {
-            task.schedule.is_ready().await
-        } else {
-            false
-        }
-    }
-
-    pub async fn is_waiting(&self) -> bool {
-        self.waiting.read().await.contains_key(&self.id)
-    }
-
-    pub async fn is_active(&self) -> bool {
-        self.active.read().await.contains_key(&self.id)
-    }
-
-    pub async fn is_paused(&self) -> bool {
-        if let Some(task) = self.waiting.read().await.get(&self.id) {
-            task.is_paused.load(Ordering::SeqCst)
-        } else if let Some(active) = self.active.read().await.get(&self.id) {
-            active.task.is_paused.load(Ordering::SeqCst)
-        } else {
-            true
-        }
-    }
-
-    pub async fn pause(&self) {
-        if let Some(task) = self.waiting.read().await.get(&self.id) {
-            task.is_paused.store(true, Ordering::SeqCst)
-        } else if let Some(active) = self.active.read().await.get(&self.id) {
-            active.task.is_paused.store(true, Ordering::SeqCst)
-        }
-    }
-
-    pub async fn resume(&self) {
-        if let Some(task) = self.waiting.read().await.get(&self.id) {
-            task.is_paused.store(false, Ordering::SeqCst)
-        } else if let Some(active) = self.active.read().await.get(&self.id) {
-            active.task.is_paused.store(false, Ordering::SeqCst)
-        }
-    }
-
-    pub async fn cancel(&mut self) {
-        if let Some(active) = self.active.write().await.get(&self.id) {
-            active.ct.cancel();
-            active.handle.abort();
-        }
-    }
-
-    pub async fn remove(&mut self) {
-        self.pause().await;
-        self.cancel().await;
-
-        self.waiting.write().await.remove(&self.id);
-        self.active.write().await.remove(&self.id);
-    }
-
-    pub fn downgrade(self) -> Id {
-        self.into()
+        write!(f, "{}", self.0)
     }
 }
