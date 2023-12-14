@@ -25,7 +25,6 @@ pub type Error = Box<dyn std::error::Error + Send + Sync>;
 pub type Result = std::result::Result<(), Error>;
 
 /// Implementing this for any arbitrary `struct` or `enum` will allow it to be added to the task scheduler.
-/// This trait is for tasks that contain `async` code. If an `async` context is not needed, implement [SyncExecutable] instead.
 #[async_trait]
 pub trait AsyncExecutable {
     async fn execute(&mut self, task: Task, ct: CancellationToken) -> Result;
@@ -48,6 +47,7 @@ where
 }
 
 #[async_trait]
+/// Represents a callback that will be invoked when a task encounters an error.
 pub trait AsyncErrorCallback {
     async fn on_error(&mut self, task: Task, e: Error);
 }
@@ -80,6 +80,11 @@ where
     Should this builder substantially outgrow its current form, revisiting the NIH syndrome approach
     will be necessary.
 */
+/// Used to construct a [`Task`] with a fluent API.
+/// The builder is verified at compile-time to ensure that all required fields are set before building,
+/// and that no fields are set more than once.
+/// The [`TaskBuilder::build()`] method does not become available until all required fields are set.
+/// In order to create a new builder, use [`Task::builder()`].
 pub struct TaskBuilder<
     const __HAS_EXEC: bool = false,
     const __HAS_SCHEDULE: bool = false,
@@ -182,13 +187,29 @@ pub(crate) struct Activity {
     pub ct: CancellationToken,
 }
 
+#[derive(Copy, Clone, Eq, PartialEq, Hash, Debug)]
+/// Represents the current status of a task.
 pub enum Status {
+    /// The task is invalid and cannot be operated on.
     Invalid,
+
+    /// The task is paused and will not be run until it is resumed.
+    /// Paused tasks will still have their schedules advanced as normal.
     Paused,
+
+    /// The task is ready and waiting to be run.
     Ready,
+
+    /// The task is currently running.
     Active,
+
+    /// The task has finished running and has exited normally.
     Finished,
+
+    /// The task has been cancelled.
     Cancelled,
+
+    /// The task cannot be run again and is awaiting removal from the scheduler.
     AwaitingRemoval,
 }
 
@@ -211,6 +232,7 @@ pub struct Task {
 }
 
 impl Task {
+    /// Creates a new [`TaskBuilder`] with no fields set.
     pub fn builder() -> TaskBuilder {
         TaskBuilder {
             exec: None,
@@ -220,6 +242,8 @@ impl Task {
         }
     }
 
+    /// Returns the current status of the task.
+    /// See [`Status`] for more information.
     pub async fn status(&self) -> Status {
         if !self.is_valid.load(Ordering::SeqCst) && !self.should_remove.load(Ordering::SeqCst) {
             Status::Invalid
@@ -248,18 +272,24 @@ impl Task {
         }
     }
 
+    /// Returns the name of the task, if one was set.
     pub fn name(&self) -> Option<String> {
         self.name.as_ref().map(|name| name.to_string())
     }
 
+    /// Pauses the task. The task will not be run until it is resumed.
+    /// Paused tasks will still have their schedules advanced as normal.
+    /// If the task is currently running, it will not be cancelled.
     pub fn pause(&self) {
         self.is_paused.store(true, Ordering::SeqCst)
     }
 
+    /// Resumes normal operation of the task.
     pub fn resume(&self) {
         self.is_paused.store(false, Ordering::SeqCst)
     }
 
+    /// Cancels the task and aborts its execution, if it is currently running.
     pub fn cancel(&mut self) {
         if let Some(activity) = self.activity.take() {
             activity.ct.cancel();
@@ -267,28 +297,14 @@ impl Task {
         }
     }
 
+    /// Signals the scheduler that this task should be removed.
+    /// The task is not removed immediately, but will be removed on the next iteration of the scheduler's background loop.
     pub async fn remove(&mut self) {
         self.pause();
         self.cancel();
 
         self.should_remove.store(true, Ordering::SeqCst);
         self.is_valid.store(false, Ordering::SeqCst);
-    }
-
-    pub fn is_valid(&self) -> bool {
-        self.is_valid.load(Ordering::SeqCst)
-    }
-
-    pub async fn is_ready(&self) -> bool {
-        self.schedule.read().await.is_ready().await
-    }
-
-    pub async fn is_finished(&self) -> bool {
-        self.schedule.read().await.is_finished().await
-    }
-
-    pub async fn is_active(&self) -> bool {
-        self.is_valid() && self.activity.is_some()
     }
 }
 
@@ -486,6 +502,7 @@ impl Task {
 }
 
 #[derive(Copy, Clone, Eq, PartialEq, Hash, Debug)]
+/// Represents the unique identifier for a task.
 pub struct Id(pub(crate) Uuid);
 
 impl std::fmt::Display for Id {
