@@ -26,12 +26,12 @@ pub type Result = std::result::Result<(), Error>;
 
 /// Implementing this for any arbitrary `struct` or `enum` will allow it to be added to the task scheduler.
 #[async_trait]
-pub trait AsyncExecutable {
+pub trait Executable {
     async fn execute(&mut self, task: Task, ct: CancellationToken) -> Result;
 }
 
 #[async_trait]
-impl<Fun, Fut> AsyncExecutable for Fun
+impl<Fun, Fut> Executable for Fun
 where
     Fun: 'static + Send + Sync + FnMut(Task, CancellationToken) -> Fut,
     Fut: Future<Output = Result> + Send + Sync,
@@ -48,12 +48,12 @@ where
 
 #[async_trait]
 /// Represents a callback that will be invoked when a task encounters an error.
-pub trait AsyncErrorCallback {
+pub trait ErrorCallback {
     async fn on_error(&mut self, task: Task, e: Error);
 }
 
 #[async_trait]
-impl<Fun, Fut> AsyncErrorCallback for Fun
+impl<Fun, Fut> ErrorCallback for Fun
 where
     Fun: Send + Sync + 'static + FnMut(Task, Error) -> Fut,
     Fut: Send + Sync + 'static + Future<Output = ()>,
@@ -91,16 +91,16 @@ pub struct TaskBuilder<
     const __HAS_ERR_FN: bool = false,
     const __HAS_NAME: bool = false,
 > {
-    exec: Option<Arc<Mutex<dyn AsyncExecutable + Send + Sync>>>,
+    exec: Option<Arc<Mutex<dyn Executable + Send + Sync>>>,
     schedule: Option<Arc<RwLock<dyn Schedule + Send + Sync>>>,
-    err_fn: Option<Arc<Mutex<dyn AsyncErrorCallback + Send + Sync>>>,
+    err_fn: Option<Arc<Mutex<dyn ErrorCallback + Send + Sync>>>,
     name: Option<String>,
 }
 
 impl<const __HAS_SCHEDULE: bool, const __HAS_ERR_FN: bool, const __HAS_NAME: bool>
     TaskBuilder<false, __HAS_SCHEDULE, __HAS_ERR_FN, __HAS_NAME>
 {
-    pub fn executable<E: AsyncExecutable + Send + Sync + 'static>(
+    pub fn executable<E: Executable + Send + Sync + 'static>(
         self,
         exec: E,
     ) -> TaskBuilder<true, __HAS_SCHEDULE, __HAS_ERR_FN, __HAS_NAME> {
@@ -134,7 +134,7 @@ impl<const __HAS_EXEC: bool, const __HAS_SCHEDULE: bool, const __HAS_NAME: bool>
 {
     pub fn on_error<Fun>(self, f: Fun) -> TaskBuilder<__HAS_EXEC, __HAS_SCHEDULE, true, __HAS_NAME>
     where
-        Fun: AsyncErrorCallback + Send + Sync + 'static,
+        Fun: ErrorCallback + Send + Sync + 'static,
     {
         TaskBuilder::<__HAS_EXEC, __HAS_SCHEDULE, true, __HAS_NAME> {
             exec: self.exec,
@@ -175,7 +175,7 @@ impl<const __HAS_ERR_FN: bool, const __HAS_NAME: bool>
             err_fn: self.err_fn,
             name: self.name.map(Arc::new),
             is_paused: Arc::new(AtomicBool::new(false)),
-            is_valid: Arc::new(AtomicBool::new(false)),
+            is_valid: Arc::new(AtomicBool::new(true)),
             should_remove: Arc::new(AtomicBool::new(false)),
             activity: None,
         }
@@ -187,32 +187,6 @@ pub(crate) struct Activity {
     pub ct: CancellationToken,
 }
 
-#[derive(Copy, Clone, Eq, PartialEq, Hash, Debug)]
-/// Represents the current status of a task.
-pub enum Status {
-    /// The task is invalid and cannot be operated on.
-    Invalid,
-
-    /// The task is paused and will not be run until it is resumed.
-    /// Paused tasks will still have their schedules advanced as normal.
-    Paused,
-
-    /// The task is ready and waiting to be run.
-    Ready,
-
-    /// The task is currently running.
-    Active,
-
-    /// The task has finished running and has exited normally.
-    Finished,
-
-    /// The task has been cancelled.
-    Cancelled,
-
-    /// The task cannot be run again and is awaiting removal from the scheduler.
-    AwaitingRemoval,
-}
-
 #[derive(Clone)]
 /// Represents a task that can be run repeatedly according to a specified schedule.
 /// A task is created by the user and then ownership is transferred to the scheduler when adding the task.
@@ -221,13 +195,14 @@ pub enum Status {
 /// Because functions don't carry state beyond what they capture from their local scope or global variables, it is recommended to use a `struct` if persistent state is needed.
 /// Tasks also may not return data (beyond error states), so if passing data around is needed it is recommended to use channels.
 pub struct Task {
-    pub(crate) exec: Arc<Mutex<dyn AsyncExecutable + Send + Sync>>,
+    // TODO: all fields should be private and we should operate on the Task via methods in the impl block
+    pub(crate) exec: Arc<Mutex<dyn Executable + Send + Sync>>,
     pub(crate) schedule: Arc<RwLock<dyn Schedule + Send + Sync>>,
-    pub(crate) err_fn: Option<Arc<Mutex<dyn AsyncErrorCallback + Send + Sync>>>,
-    pub(crate) name: Option<Arc<String>>,
-    pub(crate) is_paused: Arc<AtomicBool>,
-    pub(crate) is_valid: Arc<AtomicBool>,
-    pub(crate) should_remove: Arc<AtomicBool>,
+    pub(crate) err_fn: Option<Arc<Mutex<dyn ErrorCallback + Send + Sync>>>,
+    name: Option<Arc<String>>,
+    is_paused: Arc<AtomicBool>,
+    is_valid: Arc<AtomicBool>,
+    should_remove: Arc<AtomicBool>,
     pub(crate) activity: Option<Arc<Activity>>,
 }
 
@@ -242,39 +217,41 @@ impl Task {
         }
     }
 
-    /// Returns the current status of the task.
-    /// See [`Status`] for more information.
-    pub async fn status(&self) -> Status {
-        if !self.is_valid.load(Ordering::SeqCst) && !self.should_remove.load(Ordering::SeqCst) {
-            Status::Invalid
-        } else if self.is_paused.load(Ordering::SeqCst) {
-            Status::Paused
-        } else if self.should_remove.load(Ordering::SeqCst)
-            || self.schedule.read().await.is_finished().await
-        {
-            Status::AwaitingRemoval
-        } else if let Some(activity) = &self.activity {
-            if activity.ct.is_cancelled() {
-                Status::Cancelled
-            } else if activity.handle.is_finished() {
-                Status::Finished
-            } else {
-                Status::Active
-            }
-        } else if self.schedule.read().await.is_ready().await
-            && !self.is_paused.load(Ordering::SeqCst)
-            && self.activity.is_none()
-            && !self.should_remove.load(Ordering::SeqCst)
-        {
-            Status::Ready
+    pub fn is_valid(&self) -> bool {
+        self.is_valid.load(Ordering::SeqCst)
+    }
+
+    pub async fn is_awaiting_removal(&self) -> bool {
+        self.should_remove.load(Ordering::SeqCst) || self.is_finished().await
+    }
+
+    pub async fn is_finished(&self) -> bool {
+        self.schedule.read().await.is_finished().await
+    }
+
+    pub fn is_paused(&self) -> bool {
+        self.is_paused.load(Ordering::SeqCst)
+    }
+
+    pub async fn is_active(&self) -> bool {
+        if let Some(activity) = &self.activity {
+            !activity.ct.is_cancelled() && !activity.handle.is_finished()
         } else {
-            Status::Invalid
+            false
         }
     }
 
+    pub async fn is_ready(&self) -> bool {
+        !self.is_paused()
+            && !self.is_active().await
+            && !self.is_awaiting_removal().await
+            && self.is_valid()
+            && self.schedule.read().await.is_ready().await
+    }
+
     /// Returns the name of the task, if one was set.
-    pub fn name(&self) -> Option<String> {
-        self.name.as_ref().map(|name| name.to_string())
+    pub fn name(&self) -> Option<&str> {
+        self.name.as_ref().map(|name| name.as_str())
     }
 
     /// Pauses the task. The task will not be run until it is resumed.

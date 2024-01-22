@@ -99,80 +99,53 @@ impl Scheduler {
                     let mut to_remove = Vec::new();
 
                     for (id, task) in tasks.iter_mut() {
-                        match task.status().await {
-                            crate::task::Status::Invalid => {
-                                to_remove.push(*id);
-                            }
-                            crate::task::Status::Paused => {
-                                // continue ticking the schedule while paused
-                                let mut sched = task.schedule.write().await;
-                                if sched.is_ready().await {
-                                    sched.advance().await;
-                                }
-                            }
-                            crate::task::Status::Ready => {
-                                debug!("spawning task {}", id);
+                        if task.is_paused() || task.is_active().await {
+                            continue;
+                        } else if task.is_awaiting_removal().await {
+                            to_remove.push(*id);
+                        } else {
+                            debug!("spawning task {}", id);
 
-                                let task = task.clone();
-                                let mut task2 = task.clone();
-                                let child = child.clone();
-                                let child2 = child.clone();
-                                let handle = tokio::spawn(async move {
-                                    match task
-                                        .exec
-                                        .lock()
-                                        .await
-                                        .execute(task.clone(), child.clone())
-                                        .await
-                                    {
-                                        Ok(_) => {}
-                                        Err(e) => {
-                                            if let Some(ref callback) = task.err_fn {
-                                                callback
-                                                    .lock()
-                                                    .await
-                                                    .on_error(task.clone(), e)
-                                                    .await;
-                                            }
+                            let task = task.clone();
+                            let mut task2 = task.clone();
+                            let child = child.clone();
+                            let child2 = child.clone();
+                            let handle = tokio::spawn(async move {
+                                match task
+                                    .exec
+                                    .lock()
+                                    .await
+                                    .execute(task.clone(), child.clone())
+                                    .await
+                                {
+                                    Ok(_) => {}
+                                    Err(e) => {
+                                        if let Some(ref callback) = task.err_fn {
+                                            callback.lock().await.on_error(task.clone(), e).await;
                                         }
-                                    };
-                                });
+                                    }
+                                };
+                            });
 
-                                task2.activity = Some(Arc::new(Activity { handle, ct: child2 }));
-                            }
-                            crate::task::Status::Active => { /* do nothing */ }
-                            crate::task::Status::Finished => {
-                                std::mem::drop(task.activity.take());
-                                task.schedule.write().await.advance().await;
-                            }
-                            crate::task::Status::Cancelled => {
-                                if let Some(activity) = &task.activity {
-                                    activity.ct.cancel();
-                                    activity.handle.abort();
-                                }
-
-                                std::mem::drop(task.activity.take());
-                            }
-                            crate::task::Status::AwaitingRemoval => {
-                                if let Some(activity) = &task.activity {
-                                    activity.ct.cancel();
-                                    activity.handle.abort();
-                                }
-
-                                std::mem::drop(task.activity.take());
-                                to_remove.push(*id);
-                            }
+                            task2.activity = Some(Arc::new(Activity { handle, ct: child2 }));
                         }
                     }
 
                     for id in to_remove {
-                        if let Some(mut task) = tasks.remove(&id) {
-                            if let Some(activity) = task.activity.take() {
-                                activity.ct.cancel();
-                                activity.handle.abort();
+                        if let Some(task) = tasks.get(&id) {
+                            // we want to skip this one if the task is active because
+                            // otherwise we may accidentally remove a task that
+                            // is currently running but the schedule indicates
+                            // it won't run again and has not been manually removed
+                            // with Task::remove(). Skipping allows the task to exit
+                            // gracefully and be cleaned up in a future iteration.
+                            if task.is_active().await {
+                                continue;
                             }
-
-                            std::mem::drop(task);
+                            if let Some(task) = tasks.remove(&id) {
+                                debug!("removing task {}", id);
+                                std::mem::drop(task);
+                            }
                         }
                     }
                 }
@@ -226,8 +199,8 @@ impl Scheduler {
             .read()
             .await
             .values()
-            .filter(|x| x.name.is_some())
-            .find(|task| task.name.as_ref().unwrap().as_str() == name)
+            .filter(|x| x.name().is_some())
+            .find(|task| task.name().unwrap() == name)
             .cloned()
     }
 
