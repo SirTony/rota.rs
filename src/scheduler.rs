@@ -13,7 +13,7 @@ use tokio::{select, sync::RwLock, task::JoinHandle};
 use tokio_util::sync::{CancellationToken, WaitForCancellationFutureOwned};
 use uuid::Uuid;
 
-use crate::task::{Activity, Id, Task};
+use crate::task::{execute_task, Id, Task};
 
 #[cfg(feature = "global")]
 use tokio::sync::{OnceCell, RwLockReadGuard, RwLockWriteGuard};
@@ -40,11 +40,12 @@ pub async fn get_scheduler_mut<'write>() -> RwLockWriteGuard<'write, Scheduler> 
     GLOBAL_SCHEDULER.get().unwrap().write().await
 }
 
+#[derive(Clone)]
 pub struct Scheduler {
     tasks: Arc<RwLock<HashMap<Uuid, Task>>>,
     ct: CancellationToken,
     is_running: Arc<AtomicBool>,
-    spawner: Option<JoinHandle<()>>,
+    spawner: Option<Arc<JoinHandle<()>>>,
 }
 
 impl Default for Scheduler {
@@ -86,16 +87,12 @@ impl Scheduler {
             }
         }
 
-        let ct = self.ct.clone();
-        let is_running = self.is_running.clone();
-        let tasks = self.tasks.clone();
-        let child = self.ct.child_token();
-
+        let this = self.clone();
         let spawner = tokio::spawn(async move {
             trace!("launching spawner");
-            while !ct.is_cancelled() {
-                if is_running.load(Ordering::SeqCst) {
-                    let mut tasks = tasks.write().await;
+            while !this.ct.is_cancelled() {
+                if this.is_running.load(Ordering::SeqCst) {
+                    let mut tasks = this.tasks.write().await;
                     let mut to_remove = Vec::new();
 
                     for (id, task) in tasks.iter_mut() {
@@ -103,32 +100,9 @@ impl Scheduler {
                             continue;
                         } else if task.is_awaiting_removal().await {
                             to_remove.push(*id);
-                        } else if task.schedule.read().await.is_ready().await {
+                        } else if task.schedule().await.is_ready().await {
                             debug!("spawning task {}", id);
-
-                            task.schedule.write().await.advance().await;
-                            let task = task.clone();
-                            let mut task2 = task.clone();
-                            let child = child.clone();
-                            let child2 = child.clone();
-                            let handle = tokio::spawn(async move {
-                                match task
-                                    .exec
-                                    .lock()
-                                    .await
-                                    .execute(task.clone(), child.clone())
-                                    .await
-                                {
-                                    Ok(_) => {}
-                                    Err(e) => {
-                                        if let Some(ref callback) = task.err_fn {
-                                            callback.lock().await.on_error(task.clone(), e).await;
-                                        }
-                                    }
-                                };
-                            });
-
-                            task2.activity = Some(Arc::new(Activity { handle, ct: child2 }));
+                            execute_task(task, this.ct.child_token()).await;
                         }
                     }
 
@@ -153,14 +127,14 @@ impl Scheduler {
 
                 select! {
                     _ = tokio::time::sleep(Self::BACKGROUND_LOOP_DELAY) => { continue; },
-                    _ = ct.cancelled() => { break; }
+                    _ = this.ct.cancelled() => { break; }
                 }
             }
 
             trace!("terminating spawner");
         });
 
-        let _ = self.spawner.insert(spawner);
+        let _ = self.spawner.insert(Arc::new(spawner));
         self.is_running.store(true, Ordering::SeqCst);
     }
 

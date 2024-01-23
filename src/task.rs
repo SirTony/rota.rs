@@ -9,7 +9,7 @@ use std::{
 use async_trait::async_trait;
 use tokio::{
     select,
-    sync::{Mutex, RwLock},
+    sync::{Mutex, RwLock, RwLockReadGuard},
     task::JoinHandle,
 };
 use tokio_util::sync::CancellationToken;
@@ -192,9 +192,41 @@ impl<const __HAS_ERR_FN: bool, const __HAS_NAME: bool>
     }
 }
 
-pub(crate) struct Activity {
+struct Activity {
     pub handle: JoinHandle<()>,
     pub ct: CancellationToken,
+}
+
+pub(crate) async fn execute_task(task: &mut Task, ct: CancellationToken) {
+    log::debug!("spawning task {}", task.name().unwrap_or("<unnamed task>"));
+
+    task.schedule.write().await.advance().await;
+    let c_task = task.clone();
+    let c_ct = ct.clone();
+
+    let handle = tokio::spawn(async move {
+        let mut executor = c_task.exec.lock().await;
+        let executor = executor.execute(c_task.clone(), ct.clone());
+
+        let result = select! {
+            _ = ct.cancelled() => {
+                log::debug!( "task {} was cancelled", c_task.name().unwrap_or("<unnamed task>") );
+                Err( crate::Error::Cancelled.into() )
+            },
+            x = executor => x,
+        };
+
+        match result {
+            Ok(()) => {}
+            Err(e) => {
+                if let Some(err_fn) = &c_task.err_fn {
+                    err_fn.lock().await.on_error(c_task.clone(), e).await;
+                }
+            }
+        }
+    });
+
+    task.activity = Some(Arc::new(Activity { handle, ct: c_ct }));
 }
 
 #[derive(Clone)]
@@ -205,15 +237,14 @@ pub(crate) struct Activity {
 /// Because functions don't carry state beyond what they capture from their local scope or global variables, it is recommended to use a `struct` if persistent state is needed.
 /// Tasks also may not return data (beyond error states), so if passing data around is needed it is recommended to use channels.
 pub struct Task {
-    // TODO: all fields should be private and we should operate on the Task via methods in the impl block
-    pub(crate) exec: Arc<Mutex<dyn Executable + Send + Sync>>,
-    pub(crate) schedule: Arc<RwLock<dyn Schedule + Send + Sync>>,
-    pub(crate) err_fn: Option<Arc<Mutex<dyn ErrorCallback + Send + Sync>>>,
+    exec: Arc<Mutex<dyn Executable + Send + Sync>>,
+    schedule: Arc<RwLock<dyn Schedule + Send + Sync>>,
+    err_fn: Option<Arc<Mutex<dyn ErrorCallback + Send + Sync>>>,
     name: Option<Arc<String>>,
     is_paused: Arc<AtomicBool>,
     is_valid: Arc<AtomicBool>,
     should_remove: Arc<AtomicBool>,
-    pub(crate) activity: Option<Arc<Activity>>,
+    activity: Option<Arc<Activity>>,
 }
 
 impl Task {
@@ -225,6 +256,10 @@ impl Task {
             err_fn: None,
             name: None,
         }
+    }
+
+    pub async fn schedule(&self) -> RwLockReadGuard<'_, dyn Schedule + Send + Sync> {
+        self.schedule.read().await
     }
 
     pub fn is_valid(&self) -> bool {
