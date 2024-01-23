@@ -103,9 +103,10 @@ impl Scheduler {
                             continue;
                         } else if task.is_awaiting_removal().await {
                             to_remove.push(*id);
-                        } else {
+                        } else if task.schedule.read().await.is_ready().await {
                             debug!("spawning task {}", id);
 
+                            task.schedule.write().await.advance().await;
                             let task = task.clone();
                             let mut task2 = task.clone();
                             let child = child.clone();
