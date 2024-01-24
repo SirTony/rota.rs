@@ -16,7 +16,7 @@ use tokio_util::sync::CancellationToken;
 
 use uuid::Uuid;
 
-use crate::scheduling::{Always, Immediate, LimitedRun, Schedule};
+use crate::scheduling::{Always, Schedule, ScheduleExt};
 
 pub type Error = Box<dyn std::error::Error + Send + Sync>;
 
@@ -129,7 +129,7 @@ impl<const __HAS_EXEC: bool, const __HAS_ERR_FN: bool, const __HAS_NAME: bool>
     }
 
     pub fn as_background_task(self) -> TaskBuilder<__HAS_EXEC, true, __HAS_ERR_FN, __HAS_NAME> {
-        let schedule = Immediate::new(LimitedRun::once(Always));
+        let schedule = Always.once().immediately();
         TaskBuilder::<__HAS_EXEC, true, __HAS_ERR_FN, __HAS_NAME> {
             exec: self.exec,
             schedule: Some(Arc::new(RwLock::new(schedule))),

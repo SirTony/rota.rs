@@ -15,6 +15,70 @@ use cron::OwnedScheduleIterator;
 use crate::Error;
 
 #[async_trait]
+pub trait ScheduleExt {
+    fn once(self) -> LimitedRun<Self>
+    where
+        Self: Schedule + Sized + Send + Sync + 'static,
+    {
+        LimitedRun::once(self)
+    }
+
+    fn twice(self) -> LimitedRun<Self>
+    where
+        Self: Schedule + Sized + Send + Sync + 'static,
+    {
+        LimitedRun::twice(self)
+    }
+
+    fn thrice(self) -> LimitedRun<Self>
+    where
+        Self: Schedule + Sized + Send + Sync + 'static,
+    {
+        LimitedRun::thrice(self)
+    }
+
+    fn immediately(self) -> Immediate<Self>
+    where
+        Self: Schedule + Sized + Send + Sync + 'static,
+    {
+        Immediate::new(self)
+    }
+
+    fn not_before(self, start: DateTime<Utc>) -> NotBefore<Self>
+    where
+        Self: Schedule + Sized + Send + Sync + 'static,
+    {
+        NotBefore::new(start, self)
+    }
+
+    fn not_after(self, end: DateTime<Utc>) -> NotAfter<Self>
+    where
+        Self: Schedule + Sized + Send + Sync + 'static,
+    {
+        NotAfter::new(end, self)
+    }
+
+    fn between(self, start: DateTime<Utc>, end: DateTime<Utc>) -> Result<DateRange<Self>, Error>
+    where
+        Self: Schedule + Sized + Send + Sync + 'static,
+    {
+        DateRange::new(start, end, self)
+    }
+
+    /// Creates a schedule that runs at a fixed interval.
+    /// The base schedule is ignored and dropped when this function is called
+    /// and is primarily meant to be combined with no-op schedules like `()` or [Never].
+    fn every(self, interval: Duration) -> Interval
+    where
+        Self: Schedule + Sized + Send + Sync + 'static,
+    {
+        Interval::new(interval)
+    }
+}
+
+impl<S: Schedule + Send + Sync + 'static> ScheduleExt for S {}
+
+#[async_trait]
 pub trait Schedule {
     async fn next(&self) -> Option<DateTime<Utc>>;
     async fn advance(&mut self);
@@ -31,6 +95,27 @@ pub trait Schedule {
         self.next().await.is_none()
     }
 }
+
+#[async_trait]
+impl Schedule for () {
+    async fn next(&self) -> Option<DateTime<Utc>> {
+        None
+    }
+
+    async fn advance(&mut self) {}
+
+    async fn is_ready(&self) -> bool {
+        false
+    }
+
+    async fn is_finished(&self) -> bool {
+        true
+    }
+}
+
+/// Defines a schedule that never executes.
+/// This is effectively a no-op and an alias for `()`, which also implements [Schedule].
+pub type Never = ();
 
 /// Defines a schedule that is always ready to execute.
 pub struct Always;
